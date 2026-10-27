@@ -1,0 +1,284 @@
+{
+  "_comment": "channel-autoweight configuration. Every threshold lives here. Copy to config.json and fill in the site-specific values (or use AUTOWEIGHT_* environment variables).",
+  "ssh_host": "YOUR_SSH_HOST",
+  "pg_container": "YOUR_PG_CONTAINER",
+  "model_like": "gpt-%",
+  "exclude_model_like": "gpt-image-%",
+  "_comment_probe_token_ids": "token ids (logs.token_id) used by the probe key; their rows are excluded from real-user metrics. No key material here.",
+  "probe_token_ids": [],
+  "windows_min": [
+    60,
+    10
+  ],
+  "slow_s": 60,
+  "priority": 10,
+  "w_min": 0,
+  "w_max": 20,
+  "w_total": 18,
+  "strategy": "rank",
+  "strategies": {
+    "rank": {
+      "_comment": "Rank-based tiers: leader gets top_w; score ratio >= close_ratio gets top_w*close_factor; >= mid_ratio gets mid_w; the rest low_w. All within tie_ratio -> uniform.",
+      "top_w": 12,
+      "close_ratio": 0.85,
+      "close_factor": 0.8,
+      "mid_ratio": 0.7,
+      "mid_w": 3,
+      "low_w": 0,
+      "tie_ratio": 0.95,
+      "hysteresis": 0,
+      "band": 0,
+      "band_cap_aware": false,
+      "ramp": 0,
+      "low_traffic": {
+        "max_total_n60": 0,
+        "close_ratio": 0.8
+      },
+      "lead_trust": 0,
+      "co_lead_ratio": 0
+    },
+    "proportional": {
+      "_comment": "Alternative strategy for comparison: weight proportional to score^gamma.",
+      "gamma": 2.0
+    }
+  },
+  "score": {
+    "_comment": "score = (1-err)^err_exp * (1-slow) * latency_factor; latency_factor = t_ref/(t_ref + a*p50 + b*p90 + c*ttft). See README for every sub-feature.",
+    "t_ref": 20.0,
+    "a_p50": 0.3,
+    "b_p90": 0.3,
+    "c_ttft": 1.0,
+    "w_10m": 0.4,
+    "min_n_window": 5,
+    "ttft_missing_s": 30.0,
+    "nonstream_penalty": 0.85,
+    "err_exp": 2,
+    "err_10m_exp": 2,
+    "err_10m_min_n": 2,
+    "shrink_k": 0,
+    "exclude_probe_rows": false,
+    "empty_weight": 0,
+    "probe_fail_penalty": 0.5,
+    "len_norm": {
+      "enabled": false,
+      "min_ct": 100,
+      "ref_ct": 500,
+      "min_n": 5,
+      "mix": 1.0
+    },
+    "w10_n0": 0,
+    "cmp_guard": {
+      "enabled": false,
+      "min_ctok": 60,
+      "ratio": 0.25
+    },
+    "buffer_prob": {
+      "enabled": false,
+      "prior_a": 0.3,
+      "prior_b": 1.7,
+      "half_life_h": 6.0,
+      "max_age_h": 48
+    },
+    "slow_burst": {
+      "enabled": true,
+      "min_nn": 4,
+      "peer_min_nn": 5,
+      "ratio": 2.5,
+      "floor": 0.2,
+      "exp": 1.0
+    },
+    "conf_k": 0,
+    "conc_k": 0,
+    "conc_c0": 2.0,
+    "w10_good_n0": 0,
+    "workload_match": {
+      "enabled": true,
+      "mix": 0.3,
+      "min_n": 5
+    },
+    "log_ttft": {
+      "enabled": true,
+      "mix": 0.5,
+      "min_n": 10,
+      "adapt_full_n": 30
+    },
+    "client_err": {
+      "enabled": true,
+      "mode": "cross_channel",
+      "min_ch": 2
+    },
+    "err_recover": {
+      "enabled": false,
+      "span_s": 60,
+      "min_ok": 10,
+      "keep": 0.3
+    },
+    "timeout_slow": false
+  },
+  "min_n_rank1": 10,
+  "error_alert": {
+    "rate": 0.2,
+    "min_n": 20
+  },
+  "soft_caps": {
+    "_comment": "Per-channel soft caps {channel_id: {cap, enabled, reason, relax}}. A capped channel is flagged as a quality risk."
+  },
+  "probe": {
+    "_comment": "Active first-token probe through the public gateway. The key comes from AUTOWEIGHT_PROBE_KEY, a local key file, or a remote key file; it is never logged.",
+    "enabled": true,
+    "base_url": "https://your-gateway.example.com",
+    "path": "/v1/responses",
+    "model": "YOUR_PROBE_MODEL",
+    "n_per_channel": 1,
+    "timeout_s": 90,
+    "prompt": "Write about 200 words explaining why the sky is blue. Output the text only.",
+    "key_paths_local": [
+      "~/.config/channel-autoweight/probe_key"
+    ],
+    "key_path_remote": "",
+    "recheck": {
+      "enabled": true,
+      "ratio": 2.0,
+      "min_s": 8.0,
+      "history": 3,
+      "min_hist": 2
+    }
+  },
+  "recovery": {
+    "_comment": "Observation cap for a channel that just resumed streaming after buffered rounds.",
+    "enabled": false,
+    "min_streak": 2,
+    "cap": 6
+  },
+  "rounds_file": "data/rounds.jsonl",
+  "watch": {
+    "_comment": "Watch list: disabled/suspicious channels that are probed and reported only (no scoring, no writes).",
+    "enabled": true,
+    "ids": [],
+    "n_probe": 2,
+    "criteria": {
+      "max_ttft": 10.0,
+      "min_n": 10,
+      "max_err": 0.05,
+      "max_empty": 0.05
+    },
+    "probe_disabled": false,
+    "auto_skip": true,
+    "auto_skip_min_n60": 30
+  },
+  "trust": {
+    "_comment": "Trust: slow rise, fast fall. Bad events multiply trust by (1-down*severity); clean rounds add up*min(1, n60/up_full_n); score *= floor+(1-floor)*trust.",
+    "enabled": true,
+    "t_init": 0.6,
+    "t_min": 0.1,
+    "up": 0.2,
+    "down": 0.6,
+    "up_full_n": 30,
+    "floor": 0.85,
+    "err_10m_min_n": 2,
+    "err_full": 0.2,
+    "err_1h_thr": 0.02,
+    "probe_fail_sev": 0.8,
+    "buffered_sev": 0.5,
+    "slow_thr": 0.15,
+    "slow_sev": 0.3,
+    "gap_reset_min": 180,
+    "round_min": 45,
+    "slow_bayes": false,
+    "slow_prior_a": 0.8,
+    "slow_prior_b": 9.2,
+    "source": "shadow",
+    "shadow_max_age_min": 15,
+    "t_new": 0.3,
+    "err_10m_full_n": 0
+  },
+  "shadow": {
+    "_comment": "Shadow mode: compute suggestions every interval_min minutes, read-only, never writes to the DB.",
+    "interval_min": 5,
+    "min_real_n": 3,
+    "probe_window_min": 10,
+    "probe_cooldown_min": 30,
+    "ttft_max_age_min": 90,
+    "sev_gap_min": 10,
+    "file": "data/shadow.jsonl",
+    "backfill": true,
+    "backfill_max_min": 360,
+    "sev_gap_long_min": 60,
+    "probe_once": true,
+    "watch_ttft_fallback": false,
+    "upstream_ttft_add_s": 1.5
+  },
+  "score_smooth": {
+    "_comment": "Asymmetric score smoothing (worse follows immediately, better rises slowly). Off by default.",
+    "enabled": false,
+    "alpha_up": 0.5,
+    "alpha_down": 1.0
+  },
+  "rise_confirm": {
+    "_comment": "Weight increases need confirmation by the last n shadow suggestions. Off by default.",
+    "enabled": false,
+    "n": 3,
+    "max_n60": 0
+  },
+  "trust_cap": {
+    "_comment": "Low-trust cap: channels with trust < thr (and 1h samples < max_n60) get at most cap.",
+    "enabled": true,
+    "thr": 0.3,
+    "cap": 3,
+    "max_n60": 20
+  },
+  "newcomer": {
+    "_comment": "Newcomer cap: channels are discovered from the DB; a channel stays 'new' until it has enough formal rounds and real traffic, capped at cap with an exploration floor explore_w.",
+    "enabled": true,
+    "min_real_n60": 30,
+    "cap": 6,
+    "min_rounds": 4,
+    "reset_gap_rounds": 0,
+    "explore_w": 2,
+    "max_age_h": 0,
+    "graduate_real_n60": 30
+  },
+  "capacity": {
+    "_comment": "Known concurrency limits {channel_id: {max_conc, reason}}: cap the traffic share against the estimated peak total concurrency.",
+    "enabled": true,
+    "peak_factor": 2.0,
+    "r_mode": "rest"
+  },
+  "log_stream_veto": {
+    "_comment": "Veto a probe 'buffered' verdict when real streaming traffic in the logs shows the channel streams fine.",
+    "enabled": true,
+    "min_n": 20,
+    "max_buf": 0.2,
+    "scope": "both"
+  },
+  "small_sample": {
+    "_comment": "Cap any channel with too few real 1h requests. Off by default.",
+    "enabled": false,
+    "max_n60": 20,
+    "cap": 3
+  },
+  "reenable": {
+    "_comment": "Diagnostics for disabled channels the operator allowed to be re-attached {channel_id: {disabled_at, vendor?, ...}}. Diagnostics only."
+  },
+  "toggle": {
+    "_comment": "Autonomous on/off: suggest disabling persistently worst / erroring channels and re-enabling recovered ones, with floors min_enabled / hard_min.",
+    "enabled": true,
+    "need_streak": 3,
+    "n_test": 3,
+    "start_weight": 2,
+    "min_n60": 20,
+    "last_rounds": 5,
+    "last_span_min": 210,
+    "min_enabled": 4,
+    "hard_min": 3,
+    "err_rate": 0.2,
+    "err_rounds": 2,
+    "min_log_n": 10,
+    "upstream_baseline": true,
+    "n_base_test": 2,
+    "baseline_mode": "site",
+    "skip_buffered_ttft": true,
+    "min_log_n_buffered": 2,
+    "err_probe_fail": true
+  }
+}

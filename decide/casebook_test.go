@@ -442,3 +442,151 @@ func TestCasebookRateMeetsCutButEffBelowMin(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-019: sanitized aggregate shape from 2026-11-21 05:20 +08:00 GPT #73.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: a 10m length-normalized np50 above 2.5× the
+// peer 1h np50 median multiplies the score (here ×0.90), but settle still
+// holds the weight when the 30/3/3% fault gate is not met. SlowBurst is a
+// score factor, not a PairSlow override and not a standalone cut.
+// It does not change the algorithm.
+func TestCasebookSlowBurstPenaltyDoesNotCut(t *testing.T) {
+	ids := []int{26, 2, 23, 73, 32}
+	burstCfg := m.M{
+		"windows_min": []any{60.0, 10.0},
+		"score": m.M{"slow_burst": m.M{
+			"enabled": true, "min_nn": 4.0, "peer_min_nn": 5.0,
+			"ratio": 2.5, "floor": 0.2, "exp": 1.0,
+		}},
+	}
+	live := m.Feats{
+		2:  {Long: &m.Window{Nn: 12, Np50: m.F(40)}},
+		23: {Long: &m.Window{Nn: 34, Np50: m.F(25.4)}},
+		26: {Long: &m.Window{Nn: 28, Np50: m.F(21.51)}},
+		73: {Short: &m.Window{Nn: 6, Np50: m.F(70.5)}, Long: &m.Window{Nn: 20, Np50: m.F(38.71)}},
+		32: {Long: &m.Window{Nn: 0}},
+	}
+
+	t.Run("live_shape_multiplies_score_by_0.90", func(t *testing.T) {
+		f, why := SlowBurstFactor(live, ids, 73, burstCfg)
+		if why != "10m 归一化 np50 70.5s > 2.5×同伴 25.4s" {
+			t.Fatalf("why=%q", why)
+		}
+		if m.Round(f, 3) != 0.901 {
+			t.Fatalf("factor=%v want 0.9007 rounded to 0.901", f)
+		}
+	})
+
+	t.Run("no_penalty_at_or_below_2_5x_peer_median", func(t *testing.T) {
+		fs := m.Feats{
+			2: live[2], 23: live[23], 26: live[26], 32: live[32],
+			73: {Short: &m.Window{Nn: 6, Np50: m.F(63.5)}, Long: live[73].Long},
+		}
+		f, why := SlowBurstFactor(fs, ids, 73, burstCfg)
+		if f != 1 || why != "" {
+			t.Fatalf("equal to 2.5×ref must not penalize, got %v %q", f, why)
+		}
+	})
+
+	t.Run("no_penalty_when_short_nn_below_min", func(t *testing.T) {
+		fs := m.Feats{
+			2: live[2], 23: live[23], 26: live[26], 32: live[32],
+			73: {Short: &m.Window{Nn: 3, Np50: m.F(70.5)}, Long: live[73].Long},
+		}
+		f, why := SlowBurstFactor(fs, ids, 73, burstCfg)
+		if f != 1 || why != "" {
+			t.Fatalf("short nn=3 must not penalize, got %v %q", f, why)
+		}
+	})
+
+	t.Run("disabled_or_no_peers_is_neutral", func(t *testing.T) {
+		off := m.M{"windows_min": []any{60.0, 10.0}, "score": m.M{"slow_burst": m.M{"enabled": false}}}
+		f, why := SlowBurstFactor(live, ids, 73, off)
+		if f != 1 || why != "" {
+			t.Fatalf("disabled must be neutral, got %v %q", f, why)
+		}
+		thinPeers := m.Feats{
+			2:  {Long: &m.Window{Nn: 4, Np50: m.F(40)}},
+			23: {Long: &m.Window{Nn: 4, Np50: m.F(25.4)}},
+			26: {Long: &m.Window{Nn: 4, Np50: m.F(21.51)}},
+			73: live[73],
+			32: live[32],
+		}
+		f, why = SlowBurstFactor(thinPeers, ids, 73, burstCfg)
+		if f != 1 || why != "" {
+			t.Fatalf("peers below peer_min_nn must be neutral, got %v %q", f, why)
+		}
+	})
+
+	t.Run("decide_notes_burst_and_settle_holds_below_fault_gate", func(t *testing.T) {
+		cfg := m.M{
+			"windows_min": []any{60.0, 10.0},
+			"strategy":    "rank",
+			"min_n_rank1": 10.0,
+			"w_min":       0.0,
+			"w_max":       20.0,
+			"score": m.M{
+				"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0,
+				"min_n_window": 5.0, "empty_weight": 0.0, "w_10m": 0.0, "ttft_missing_s": 30.0,
+				"slow_burst": m.M{"enabled": true, "min_nn": 4.0, "peer_min_nn": 5.0, "ratio": 2.5, "floor": 0.2, "exp": 1.0},
+			},
+			"strategies": m.M{"rank": m.M{"top_w": 20.0, "close_ratio": 0.85, "close_factor": 0.8, "mid_ratio": 0.7, "mid_w": 3.0, "low_w": 0.0, "hysteresis": 0.0, "band": 0.0, "ramp": 0.0, "lead_min_n": 0.0}},
+			"settle":     m.M{"cut_needs_fault": true, "raise_clean": false},
+		}
+		win := func(n int, p50 float64, nn int, np50 *float64) *m.Window {
+			return &m.Window{N: n, P50: m.F(p50), P90: m.F(p50), ErrRate: m.F(0), Nn: nn, Np50: np50}
+		}
+		fs := m.Feats{
+			2:  {Long: win(21, 16, 12, m.F(40)), Chan: &m.ChanStat{N: 17, Err: 0, Eff: 0, Rate: 0}},
+			23: {Long: win(41, 20, 34, m.F(25.4)), Chan: &m.ChanStat{N: 37, Err: 0, Eff: 0, Rate: 0}},
+			26: {Long: win(37, 15, 28, m.F(21.51)), Chan: &m.ChanStat{N: 33, Err: 0, Eff: 0, Rate: 0}},
+			73: {Long: win(28, 24, 20, m.F(38.71)), Short: &m.Window{N: 6, Nn: 6, Np50: m.F(70.5)}, Chan: &m.ChanStat{N: 24, Err: 1, Client: 0, Eff: 1, Rate: m.Round(1.0/24.0, 4)}},
+			32: {Long: win(4, 3, 0, nil), Chan: &m.ChanStat{N: 0, Err: 0, Eff: 0, Rate: 0}},
+		}
+		d, err := Decide(Input{
+			Cfg:      cfg,
+			Chans:    []m.Channel{{ID: 26}, {ID: 2}, {ID: 23}, {ID: 73}, {ID: 32}},
+			Feats:    fs,
+			Strategy: "rank",
+			Prev:     map[int]int{2: 20, 23: 20, 26: 20, 32: 20, 73: 20},
+		})
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		row := d.Scores[73]
+		if row == nil || row.SlowBurst == nil || *row.SlowBurst != 0.901 {
+			t.Fatalf("slow_burst=%v want 0.901", row)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if !strings.Contains(joined, "#73 突发变慢：10m 归一化 np50 70.5s > 2.5×同伴 25.4s，分数×0.90") {
+			t.Fatalf("missing burst note, got %q", d.Notes)
+		}
+		if d.Target[73] != 20 {
+			t.Fatalf("#73 weight=%d want 20 after settle hold; notes=%q", d.Target[73], d.Notes)
+		}
+		if !strings.Contains(joined, "无渠道级错误证据") || !strings.Contains(joined, "1h 真实 24") || !strings.Contains(joined, "渠道错误 1") || !strings.Contains(joined, "去集中 1") || !strings.Contains(joined, "延迟/小样本不单独降权") {
+			t.Fatalf("expected settle hold note, got %q", d.Notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", d.Notes)
+		}
+	})
+
+	t.Run("fault_gate_still_cuts_even_with_slow_burst", func(t *testing.T) {
+		feat := &m.Feat{
+			Long:  &m.Window{N: 30, ErrRate: m.F(0.1)},
+			Short: &m.Window{Nn: 6, Np50: m.F(70.5)},
+			Chan:  &m.ChanStat{N: 30, Err: 3, Eff: 3, Rate: 0.1},
+		}
+		next := map[int]int{73: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{73: 20}, m.Feats{73: feat}, []int{73}, nil, &notes)
+		if next[73] != 18 {
+			t.Fatalf("weight=%d want 18 once 30/3/3%% is met", next[73])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("expected fault cut note, got %q", notes)
+		}
+	})
+}

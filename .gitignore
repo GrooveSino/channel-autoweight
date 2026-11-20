@@ -3,3 +3,7 @@ snaps/
 data/
 config.json
 .env
+
+# Local-only Python learning helper artifacts
+__pycache__/
+*.pyc

@@ -1,6 +1,14 @@
 # channel-autoweight
 
-Go implementation of automatic weight scheduling for LLM API gateway channels.
+面向LLM API网关的Go自动权重计算器。
+
+## 中文维护入口（2026-11-21）
+
+- [算法经验本](docs/algorithm-casebook.md)：14类典型场景、证据、设计目标与当前应对差距。
+- [每轮改进与四轮复盘](docs/CONTINUOUS-IMPROVEMENT.md)：确切命令、去重计数、锁和外部状态。
+- [改进日志](docs/improvement-log.md)：区分算法变更、工具、测试和未修改原因。
+
+当前研发候选ci-casebook-20261121.1不改变v5.01算法行为，未部署。生产固定二进制与独立weight-only入口不在本仓研发中替换。下文旧apply/live-probe命令仅为历史接口说明，不是当前生产运行许可：旧apply会写priority，toggle可启停；当前生产权限只允许精确范围的weight。
 
 This is now the default (`main`) tree. The previous Python implementation is kept
 on the [`python-legacy`](https://github.com/GrooveSino/channel-autoweight/tree/python-legacy)
@@ -14,7 +22,7 @@ The logic was originally aligned with Python v3.36 (write-path and toggle behavi
 defaults that were off and worse in backtests were not ported). Current settle/score
 rules are described below.
 
-## 每轮命令
+## 历史CLI接口（不要据此运行当前生产）
 
 ```sh
 go build -o bin/ ./cmd/...
@@ -36,7 +44,7 @@ bin/awcheck -expect 'ID=W,...'       # 只读复核（优先级 10、abilities �
 
 v5.00（2026-11-18，把 11-18 反复出现的人工推翻写进规则）：
 - 客户端错误不算渠道故障：`Adaptive thinking required`、`Client connection closed`、签名 400、`Unsupported parameter` 等
-  （`[ReverixAI]` 新格式没有 status_code，以前被当成渠道错误）；404 model_not_found 只在集中于单个令牌时排除。
+  （`[ReverixAI]` 新格式没有 status_code，以前被当成渠道错误）；显式404先按通用4xx排除，无标准状态码的NF标签另有集中度处理，见经验本CASE-AW-002。
 - 超时不再"总计入"：单令牌集中的超时和其他单令牌错误一样去集中（429 / Concurrency limit 仍总计入）。
 - `settle.cut_needs_fault`（GPT、Claude 都开）：任何降权、极端清零和系统上限（信任/新渠道/小样本/容量）都要求
   1h 真实≥30、去集中错误≥3 且≥3%；操作员 soft_caps 不受影响。
@@ -54,8 +62,7 @@ v5.01（2026-11-19，Groove 11-19 10:00「明显偏慢的渠道不该保持高�
   "上游不支持某功能"（does not support / not supported / unsupported）与加密上下文错误不再要求 status_code=400，归客户端；
   `Invalid request parameter`、`Invalid 'input…'` 归客户端；`Model service temporarily limited` 归容量（同 429）。
 
-安全：查询全在 `BEGIN READ ONLY`；唯一写操作是改权重（channels+abilities 同事务）；
-优先级保持 10；不打印密钥。
+边界：旧查询有只读事务；旧apply更新两表weight及priority，另可启停，并非weight-only安全入口。GPT配置priority10、Claude7。不得打印密钥；本地研发只能用脱敏fixture离线测试。
 
 ## 结构
 

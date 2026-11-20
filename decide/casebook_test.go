@@ -328,3 +328,117 @@ func TestCasebookTrustUsesRawWindowNotChanStat(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-018: sanitized aggregate shape from 2026-11-21 04:28 +08:00 GPT #23.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: settle's ordinary cut is a conjunction
+// (N>=30 AND Eff>=3 AND Rate>=.03). Rate alone at 3.23% does not cut when
+// Eff=2. Trust still reads the raw scoring window (3/68=4.4%), not ChanStat.
+// It does not change the algorithm.
+func TestCasebookRateMeetsCutButEffBelowMin(t *testing.T) {
+	now := int64(100000)
+	build := func(n500, n400 int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		for n := 0; n < 60; n++ {
+			rows = append(rows, m.Row{Ch: 23, T: now - 30, Type: 2, Tok: 900003})
+		}
+		for n := 0; n < n500; n++ {
+			rows = append(rows, m.Row{Ch: 23, T: now - 40*60, Type: 5, Tok: 900010 + n, Sc: m.I(500)})
+		}
+		for n := 0; n < n400; n++ {
+			rows = append(rows, m.Row{Ch: 23, T: now - 40*60, Type: 5, Tok: 900020 + n, Sc: m.I(400)})
+		}
+		for n := 0; n < 5; n++ {
+			rows = append(rows, m.Row{Ch: 23, T: now - 10, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 23}}, rows, now)
+	}
+
+	t.Run("rate_3pct_but_eff_2_holds_and_trust_uses_raw_window", func(t *testing.T) {
+		fs := build(2, 1)
+		f := fs[23]
+		if f == nil || f.Long == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Long.N != 68 || f.Long.Err != 3 {
+			t.Fatalf("raw window n=%d err=%d want 68/3", f.Long.N, f.Long.Err)
+		}
+		rate := m.Or(f.Long.ErrRate, 0)
+		if rate != m.Round(3.0/68.0, 4) {
+			t.Fatalf("raw err rate=%v want rounded 3/68=0.0441", rate)
+		}
+		if f.Chan.N != 62 || f.Chan.Err != 2 || f.Chan.Client != 1 || f.Chan.Eff != 2 {
+			t.Fatalf("chanstat=%+v want N=62 Err=2 Client=1 Eff=2", f.Chan)
+		}
+		if f.Chan.Rate != m.Round(2.0/62.0, 4) {
+			t.Fatalf("chan rate=%v want rounded 2/62=0.0323", f.Chan.Rate)
+		}
+
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+		prev := 0.7858
+		st := trust.Step(cfg, []int{23}, fs, nil, map[int]float64{23: prev}, nil)[23]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0.12 || st.Trust != 0.7292 {
+			t.Fatalf("trust sev=%v value=%v want 0.12 / 0.7292", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "1h 错误率 4.4%") {
+			t.Fatalf("expected raw-window trust note, got %q", st.Why)
+		}
+
+		// Live shape: already at the strategy target, so settle may emit no note.
+		// Absence of a 定档 note is not a skipped threshold check.
+		atTarget := map[int]int{23: 20}
+		var silent []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, atTarget, map[int]int{23: 20}, fs, []int{23}, nil, &silent)
+		if atTarget[23] != 20 {
+			t.Fatalf("weight=%d want 20 when Eff=2 even though Rate>=3%%", atTarget[23])
+		}
+		if strings.Contains(strings.Join(silent, ";"), "达降权门槛") {
+			t.Fatalf("did not expect a cut note when Eff<3, got %q", silent)
+		}
+
+		// Same ChanStat with a strategy cut: hold, and now the note is explicit.
+		held := map[int]int{23: 16}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, held, map[int]int{23: 20}, fs, []int{23}, nil, &notes)
+		if held[23] != 20 {
+			t.Fatalf("weight=%d want 20", held[23])
+		}
+		hold := strings.Join(notes, ";")
+		for _, part := range []string{"无渠道级错误证据", "1h 真实 62", "渠道错误 2", "去集中 2"} {
+			if !strings.Contains(hold, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("eff_3_and_rate_above_3pct_cuts", func(t *testing.T) {
+		fs := build(3, 0)
+		f := fs[23]
+		if f.Long.N != 68 || f.Long.Err != 3 {
+			t.Fatalf("raw window n=%d err=%d want 68/3", f.Long.N, f.Long.Err)
+		}
+		if f.Chan.N != 63 || f.Chan.Err != 3 || f.Chan.Client != 0 || f.Chan.Eff != 3 {
+			t.Fatalf("chanstat=%+v want N=63 Err=3 Client=0 Eff=3", f.Chan)
+		}
+		if f.Chan.Rate != m.Round(3.0/63.0, 4) {
+			t.Fatalf("chan rate=%v want rounded 3/63=0.0476", f.Chan.Rate)
+		}
+
+		next := map[int]int{23: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{23: 20}, fs, []int{23}, nil, &notes)
+		if next[23] != 18 {
+			t.Fatalf("weight=%d want 18 once 30/3/3%% is met", next[23])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "渠道错误 3/63") || !strings.Contains(joined, "去集中 3") || !strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("expected fault cut note, got %q", notes)
+		}
+	})
+}

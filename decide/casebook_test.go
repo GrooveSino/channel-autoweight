@@ -691,3 +691,101 @@ func TestCasebookTrustSlowRateOnProbeThinWindow(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-021: sanitized follow-up to CASE-AW-020 from 2026-11-21 06:49 +08:00.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks in existing v5.01 trust-recovery semantics; it does not change the algorithm.
+func TestCasebookTrustRecoversOnProbeThinQuietWindow(t *testing.T) {
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08). The other
+	// knobs match both Defaults and the live file; they are listed so the
+	// recovery arithmetic does not silently depend on a different default.
+	cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2612s.
+	gap := m.F(2612.0 / 60.0)
+	live := func() m.Feats {
+		return m.Feats{
+			68: {
+				Long:  &m.Window{N: 4, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0), P50: m.F(3), P90: m.F(3)},
+				Short: &m.Window{N: 0, Err: 0},
+				Mix:   &m.Mix{NUser: 0, NProbe: 4},
+			},
+		}
+	}
+
+	t.Run("live_shape_recovers_trust_after_probe_thin_slow_penalty", func(t *testing.T) {
+		fs := live()
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.3783}, gap)[68]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0 || st.Trust != 0.4041 {
+			t.Fatalf("trust sev=%v value=%v want 0 / 0.4041", st.Sev, st.Trust)
+		}
+		if strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("did not expect a slow-rate note after recovery, got %q", st.Why)
+		}
+	})
+
+	t.Run("recovery_uses_scoring_window_n_including_probes", func(t *testing.T) {
+		fs := live()
+		fs[68].Chan = &m.ChanStat{N: 0, Err: 0, Eff: 0, Rate: 0}
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.3783}, gap)[68]
+		if st.Sev != 0 || st.Trust != 0.4041 {
+			t.Fatalf("zero real ChanStat must not freeze recovery, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("empty_scoring_window_does_not_raise_trust", func(t *testing.T) {
+		fs := live()
+		fs[68].Long.N = 0
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.3783}, gap)[68]
+		if st.Sev != 0 || st.Trust != 0.3783 {
+			t.Fatalf("n=0 must leave trust unchanged, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("peer_channel_recovers_in_proportion_to_scoring_n", func(t *testing.T) {
+		fs := m.Feats{
+			72: {
+				Long:  &m.Window{N: 6, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0)},
+				Short: &m.Window{N: 2, Err: 0, ErrRate: m.F(0)},
+				Mix:   &m.Mix{NUser: 2, NProbe: 4},
+				Chan:  &m.ChanStat{N: 2, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+		}
+		st := trust.Step(cfg, []int{72}, fs, nil, map[int]float64{72: 0.6918}, gap)[72]
+		if st.Sev != 0 || st.Trust != 0.7305 {
+			t.Fatalf("#72 trust sev=%v value=%v want 0 / 0.7305", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("still_penalizes_if_slow_rate_threshold_still_met", func(t *testing.T) {
+		fs := live()
+		fs[68].Long.N = 5
+		fs[68].Long.SlowRate = m.F(0.2)
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.3783}, gap)[68]
+		// 0.3783 * (1 - 0.6*0.3) = 0.310206 -> 0.3102; must not recover.
+		if st.Sev != 0.3 || st.Trust != 0.3102 {
+			t.Fatalf("n=5 / slow_rate=20%% must keep penalizing, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("settle_holds_at_20_with_zero_real_traffic", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{68: 0}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{68: 20}, fs, []int{68}, nil, &notes)
+		if next[68] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[68], notes)
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "无渠道级错误证据") || !strings.Contains(joined, "1h 真实 0") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") || !strings.Contains(joined, "延迟/小样本不单独降权") {
+			t.Fatalf("expected settle hold note, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+}

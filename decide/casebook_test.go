@@ -3,6 +3,7 @@ package decide
 import (
 	"autoweight/features"
 	m "autoweight/model"
+	"autoweight/trust"
 	"strings"
 	"testing"
 )
@@ -224,6 +225,106 @@ func TestCasebookRank1PromotionRecover(t *testing.T) {
 		joined := strings.Join(notes, ";")
 		if !strings.Contains(joined, "不加") {
 			t.Fatalf("expected refused-raise note, got %q", notes)
+		}
+	})
+}
+
+// CASE-AW-017: sanitized aggregate shape from 2026-11-21 03:46 +08:00 GPT #73.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: trust reads the raw scoring window, not ChanStat
+// after client-class exclusion. It does not change the algorithm.
+func TestCasebookTrustUsesRawWindowNotChanStat(t *testing.T) {
+	now := int64(100000)
+	build := func(status *int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		for n := 0; n < 61; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 30, Type: 2, Tok: 900003})
+		}
+		for n := 0; n < 4; n++ {
+			// Spread faults across tokens so a 5xx contrast is not
+			// discounted by the dominant-token cap (tok_cap=2).
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 5, Tok: 900010 + n, Sc: status})
+		}
+		for n := 0; n < 4; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 10, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 73}}, rows, now)
+	}
+
+	t.Run("client_400_penalizes_trust_but_settle_holds", func(t *testing.T) {
+		fs := build(m.I(400))
+		f := fs[73]
+		if f == nil || f.Long == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Long.N != 69 || f.Long.Err != 4 {
+			t.Fatalf("raw window n=%d err=%d want 69/4", f.Long.N, f.Long.Err)
+		}
+		rate := m.Or(f.Long.ErrRate, 0)
+		if rate != m.Round(4.0/69.0, 4) {
+			t.Fatalf("raw err rate=%v want rounded 4/69=0.058", rate)
+		}
+		if f.Chan.N != 61 || f.Chan.Err != 0 || f.Chan.Client != 4 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=61 Err=0 Client=4 Eff=0 Rate=0", f.Chan)
+		}
+
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+		st := trust.Step(cfg, []int{73}, fs, nil, map[int]float64{73: 0.9508}, nil)[73]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0.19 || st.Trust != 0.8424 {
+			t.Fatalf("trust sev=%v value=%v want 0.19 / 0.8424", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "1h 错误率 5.8%") {
+			t.Fatalf("expected raw-window trust note, got %q", st.Why)
+		}
+
+		next := map[int]int{73: 16}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{73: 20}, fs, []int{73}, nil, &notes)
+		if next[73] != 20 {
+			t.Fatalf("weight=%d want 20", next[73])
+		}
+		hold := strings.Join(notes, ";")
+		for _, part := range []string{"无渠道级错误证据", "1h 真实 61", "渠道错误 0", "去集中 0"} {
+			if !strings.Contains(hold, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("channel_500_still_penalizes_trust_and_settle_cuts", func(t *testing.T) {
+		fs := build(m.I(500))
+		f := fs[73]
+		if f.Long.N != 69 || f.Long.Err != 4 {
+			t.Fatalf("raw window n=%d err=%d want 69/4", f.Long.N, f.Long.Err)
+		}
+		if f.Chan.N != 65 || f.Chan.Err != 4 || f.Chan.Client != 0 || f.Chan.Eff != 4 {
+			t.Fatalf("chanstat=%+v want N=65 Err=4 Client=0 Eff=4", f.Chan)
+		}
+		if f.Chan.Rate != m.Round(4.0/65.0, 4) {
+			t.Fatalf("chan rate=%v want rounded 4/65=0.0615", f.Chan.Rate)
+		}
+
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+		st := trust.Step(cfg, []int{73}, fs, nil, map[int]float64{73: 0.9508}, nil)[73]
+		if st.Sev != 0.19 || st.Trust != 0.8424 {
+			t.Fatalf("trust sev=%v value=%v want 0.19 / 0.8424 (raw window unchanged)", st.Sev, st.Trust)
+		}
+
+		next := map[int]int{73: 16}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{73: 20}, fs, []int{73}, nil, &notes)
+		if next[73] != 18 {
+			t.Fatalf("weight=%d want 18 once 30/3/3%% is met", next[73])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "渠道错误 4/65") || !strings.Contains(joined, "去集中 4") {
+			t.Fatalf("expected fault cut note, got %q", notes)
 		}
 	})
 }

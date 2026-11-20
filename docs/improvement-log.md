@@ -41,3 +41,14 @@ cycle及四个ordinal / 每项案例是否仍适用 / 新增或修订证据 / �
 - 实证：仅用算法窗聚合，不把监测窗去重样本代入。min_n_rank1=10 作用于评分窗 n60，不是 ChanStat N，也不是监测窗。两渠道平分是当前 StratRank 在“新 top 低于被取消资格者分数”时的既有行为，现网本轮因另有低于门槛的分数未触发；只锁定，不改判定。
 - 测试结果与精确 commit 在提交后写入外部 learning/state.json 的本轮 annotate，避免文档自引用 hash。
 - 当前计数：本轮为截点后第 2 个唯一真实调权轮；下一复盘点为第 4 轮。Mac 若离线，文档仅本机与仓库分支留存。
+
+## ROUND-20261121-034607+0800（计入第 3 轮）
+
+- 日期：2026-11-21 03:46:07–03:46:18（北京时间，Asia/Shanghai）；run_dir `20261121-034607+0800`；outcome=verified_noop；未写入生产权重，授权渠道全部维持 20。
+- 运行算法：v5.01；运行 binary SHA256 `0db48260f84ef1b93b365e023e96c4556355b595fcdc502ddfdbb5ee4c109b79`。本候选不改变算法行为、不部署、不替换固定二进制。
+- 候选包：ci-casebook-20261121.4。
+- 候选：CASE-AW-017（本轮算法窗 GPT #73：评分窗 4/69=5.8% 触发 trust「1h 错误率 5.8%」，由 0.9508 降至 0.8424；ChanStat 将 4 条全部计为客户端类，N=61/Err=0/Eff=0，Settle 维持 20）。并复核 CASE-AW-001：同轮 #26 为 N=197、渠道错误 2、去集中仍为 2、Rate=1.02%，并非“总错误高但去集中后比例低”。
+- 实际修改：新增 CASE-AW-017 及合成回归 `TestCasebookTrustUsesRawWindowNotChanStat`（400 客户端：trust 下降但定档维持；500 对照：trust 同样按原始窗处罚，Settle 降到 18）。为 CASE-AW-001 补本轮对照证据。未改核心 trust/settle 实现、原配置、runner 或生产权限。
+- 实证：仅用算法窗聚合，不把监测窗去重样本代入。trust 读评分窗 Window，不读 ChanStat；不能把「1h 错误率 5.8%」写成渠道故障率。#26 本窗口 Eff=Err=2，集中度未压低分子。
+- 测试结果与精确 commit 在提交后写入外部 learning/state.json 的本轮 annotate，避免文档自引用 hash。
+- 当前计数：本轮为截点后第 3 个唯一真实调权轮；下一复盘点为第 4 轮。Mac 若离线，文档仅本机与仓库分支留存。

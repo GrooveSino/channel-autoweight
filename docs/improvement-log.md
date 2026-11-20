@@ -30,3 +30,14 @@ cycle及四个ordinal / 每项案例是否仍适用 / 新增或修订证据 / �
 - 实证：仅用算法窗聚合，不把监测窗去重样本代入。不把 18.2% 或「策略 0」误报为已达降权门槛；Rate 分母为 Eff/(N-Err+Eff)=2/11。触发 cap 的 n60=15 与 ChanStat N=11 不是同一窗口。
 - 测试结果与精确 commit 在提交后写入外部 learning/state.json 的本轮 annotate，避免文档自引用 hash。
 - 当前计数：本轮为截点后第 1 个唯一真实调权轮；下一复盘点为第 4 轮。Mac 本轮离线，文档仅本机与仓库分支留存。
+
+## ROUND-20261121-030643+0800（计入第 2 轮）
+
+- 日期：2026-11-21 03:06:43–03:06:54（北京时间，Asia/Shanghai）；run_dir `20261121-030643+0800`；outcome=verified_write；#23 渠道及 8 个 abilities 权重 18→20，其余授权渠道维持 20。
+- 运行算法：v5.01；运行 binary SHA256 `0db48260f84ef1b93b365e023e96c4556355b595fcdc502ddfdbb5ee4c109b79`。本候选不改变算法行为、不部署、不替换固定二进制。
+- 候选包：ci-casebook-20261121.3。
+- 候选：CASE-AW-016（本轮算法窗 GPT #32 n60=7 失去首位资格，#23 被顶上后策略 20，ChanStat N=297 无错误，接受 18→20）。并复核 CASE-AW-008：恢复来自策略升权，不是 raise_clean。
+- 实际修改：新增 CASE-AW-016 及合成回归 `TestCasebookRank1PromotionRecover`（三渠道形态下顶上并升权；n60=22 时次位维持 18；两渠道顶上后走全员平分维持 18；ChanStat N<30 时策略升权不加）。为 CASE-AW-008 补本轮脱敏恢复证据。未改核心 decide/strategy/settle 实现、原配置、runner 或生产权限。
+- 实证：仅用算法窗聚合，不把监测窗去重样本代入。min_n_rank1=10 作用于评分窗 n60，不是 ChanStat N，也不是监测窗。两渠道平分是当前 StratRank 在“新 top 低于被取消资格者分数”时的既有行为，现网本轮因另有低于门槛的分数未触发；只锁定，不改判定。
+- 测试结果与精确 commit 在提交后写入外部 learning/state.json 的本轮 annotate，避免文档自引用 hash。
+- 当前计数：本轮为截点后第 2 个唯一真实调权轮；下一复盘点为第 4 轮。Mac 若离线，文档仅本机与仓库分支留存。

@@ -103,3 +103,127 @@ func TestCasebookTrustCapHeldWithoutFault(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-016: sanitized relative-score shape from 2026-11-21 03:06 +08:00 GPT #23/#32.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 rank-1 eligibility and settle raise; it does not change the algorithm.
+func TestCasebookRank1PromotionRecover(t *testing.T) {
+	cfg := m.M{
+		"windows_min": []any{60.0, 10.0},
+		"strategy":    "rank",
+		"min_n_rank1": 10.0,
+		"w_min":       0.0,
+		"w_max":       20.0,
+		"score":       m.M{"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0, "min_n_window": 5.0, "empty_weight": 0.0, "w_10m": 0.0, "ttft_missing_s": 30.0},
+		"strategies":  m.M{"rank": m.M{"top_w": 20.0, "close_ratio": 0.85, "close_factor": 0.8, "mid_ratio": 0.7, "mid_w": 3.0, "low_w": 0.0, "hysteresis": 0.0, "band": 0.0, "ramp": 0.0, "lead_min_n": 0.0}},
+		"settle":      m.M{"cut_needs_fault": true, "raise_clean": false},
+	}
+	feat := func(n60, chanN int, p50 float64) *m.Feat {
+		return &m.Feat{
+			Long: &m.Window{N: n60, P50: m.F(p50), P90: m.F(p50), ErrRate: m.F(0)},
+			Chan: &m.ChanStat{N: chanN, Err: 0, Eff: 0, Rate: 0},
+		}
+	}
+	// p50 10 vs 14 keeps the thinner channel ahead on score, with the richer
+	// channel inside the close band (ratio ≈ 0.88) when the thinner one leads.
+	// A third, slower channel is required: after promoting a lower-scoring
+	// leader, StratRank uses that new leader as "top". A still-higher ineligible
+	// score then sits above tie_ratio*top, and with only two channels the
+	// all-tie split (w_total/n) would fire. Production this round had five
+	// channels and a below-threshold score, so top_w was assigned normally.
+	run := func(n60Thin int, chanNThin int, extra bool) *Decision {
+		t.Helper()
+		chans := []m.Channel{{ID: 32}, {ID: 23}}
+		fs := m.Feats{32: feat(n60Thin, chanNThin, 10), 23: feat(303, 297, 14)}
+		prev := map[int]int{32: 20, 23: 18}
+		if extra {
+			chans = append(chans, m.Channel{ID: 26})
+			fs[26] = feat(100, 100, 22)
+			prev[26] = 20
+		}
+		d, err := Decide(Input{
+			Cfg:      cfg,
+			Chans:    chans,
+			Feats:    fs,
+			Strategy: "rank",
+			Prev:     prev,
+		})
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		return d
+	}
+
+	t.Run("thin_leader_is_replaced_and_second_raises", func(t *testing.T) {
+		d := run(7, 3, true)
+		if d.Scores[32].EligibleRank1 {
+			t.Fatalf("n60=7 should be ineligible for rank 1")
+		}
+		if !d.Scores[23].EligibleRank1 {
+			t.Fatalf("#23 should be eligible for rank 1")
+		}
+		if d.Order[0] != 23 {
+			t.Fatalf("order=%v want #23 first after promotion", d.Order)
+		}
+		if d.Target[23] != 20 {
+			t.Fatalf("#23 weight=%d want 20 (strategy raise accepted); notes=%q", d.Target[23], d.Notes)
+		}
+		if d.Target[32] != 20 || d.Target[26] != 20 {
+			t.Fatalf("weights=%v want #32 and #26 held at 20", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if !strings.Contains(joined, "#32 样本不足，不得排第一，由 #23 顶上") {
+			t.Fatalf("missing promotion note, got %q", d.Notes)
+		}
+	})
+
+	t.Run("sufficient_leader_stays_first_and_close_is_held", func(t *testing.T) {
+		d := run(22, 22, true)
+		if !d.Scores[32].EligibleRank1 {
+			t.Fatalf("n60=22 should be eligible for rank 1")
+		}
+		if d.Order[0] != 32 {
+			t.Fatalf("order=%v want #32 first", d.Order)
+		}
+		if d.Target[32] != 20 || d.Target[23] != 18 || d.Target[26] != 20 {
+			t.Fatalf("weights=%v want #32=20 #23=18 #26=20", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if strings.Contains(joined, "不得排第一") {
+			t.Fatalf("did not expect promotion note, got %q", d.Notes)
+		}
+	})
+
+	t.Run("two_channel_all_tie_after_promotion_holds", func(t *testing.T) {
+		// Current behavior: only two channels, ineligible leader still outscores
+		// the promoted one, all-tie split assigns 9, settle holds 18/20.
+		d := run(7, 3, false)
+		if d.Order[0] != 23 {
+			t.Fatalf("order=%v want #23 first after promotion", d.Order)
+		}
+		if d.Target[23] != 18 || d.Target[32] != 20 {
+			t.Fatalf("weights=%v want #23 held at 18 and #32 held at 20 after all-tie split", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if !strings.Contains(joined, "#32 样本不足，不得排第一，由 #23 顶上") {
+			t.Fatalf("missing promotion note, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "策略 9→18") {
+			t.Fatalf("expected all-tie strategy 9 held to 18, got %q", d.Notes)
+		}
+	})
+
+	t.Run("strategy_raise_refused_when_chanstat_below_min_real", func(t *testing.T) {
+		next := map[int]int{23: 20}
+		feat := &m.Feat{Long: &m.Window{N: 7, ErrRate: m.F(0)}, Chan: &m.ChanStat{N: 7, Err: 0, Eff: 0, Rate: 0}}
+		var notes []string
+		Settle(cfg, next, map[int]int{23: 18}, m.Feats{23: feat}, []int{23}, nil, &notes)
+		if next[23] != 18 {
+			t.Fatalf("weight=%d want 18 (N<30 must not take a strategy raise)", next[23])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "不加") {
+			t.Fatalf("expected refused-raise note, got %q", notes)
+		}
+	})
+}

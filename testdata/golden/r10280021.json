@@ -1,0 +1,176 @@
+{
+  "now": 1793118108,
+  "trust_source": "shadow 00:20 +1.8m",
+  "trust": {
+    "2": 1,
+    "20": 0.8746,
+    "22": 1,
+    "23": 1,
+    "26": 0.2451,
+    "5": 1
+  },
+  "newcomers": [],
+  "order": [
+    5,
+    20,
+    23,
+    2,
+    26,
+    22
+  ],
+  "target": {
+    "2": 8,
+    "20": 12,
+    "22": 3,
+    "23": 12,
+    "26": 2,
+    "5": 2
+  },
+  "scores": {
+    "2": 0.3653,
+    "20": 0.4273,
+    "22": 0.347,
+    "23": 0.3949,
+    "26": 0.3554,
+    "5": 0.6586
+  },
+  "notes": [
+    "#5 软上限 6（ECO 高并发下曾推理过少/空回复），目标 12.0 被截断，已标记质量风险",
+    "#2 定档：策略 10→8（每轮最多加 2）",
+    "#5 定档：策略 6→2（低于下限 2 时只回到 2（防饿死））",
+    "#23 定档：策略 10→12（无渠道级错误证据（1h 真实 70、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#26 定档：策略 3→2（1h 真实 6（门槛 30）、去集中错误率 0.0%，不加）"
+  ],
+  "access_denied": [],
+  "ad_streak": {},
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 6,
+    "passes": {
+      "21": true
+    },
+    "streaks": {
+      "21": 2
+    },
+    "bottom": [
+      22,
+      26
+    ],
+    "dormant": [],
+    "base_skipped": [],
+    "base_lax": {},
+    "base": {
+      "total": 9.91,
+      "ttft": 5.165
+    },
+    "base_up": {
+      "n": 1,
+      "total": 3.83,
+      "ttft": 3.15
+    },
+    "bup_ids": [
+      22,
+      26
+    ],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 49.5,
+        "last_streak": 2,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "26": {
+        "disable": false,
+        "dormant_streak": 3,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

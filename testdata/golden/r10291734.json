@@ -1,0 +1,181 @@
+{
+  "now": 1793266454,
+  "trust_source": "shadow 17:30 +4.2m",
+  "trust": {
+    "2": 1,
+    "20": 0.1,
+    "22": 1,
+    "23": 1,
+    "26": 0.1,
+    "5": 1
+  },
+  "newcomers": [],
+  "order": [
+    22,
+    2,
+    5,
+    26,
+    23,
+    20
+  ],
+  "target": {
+    "2": 10,
+    "20": 0,
+    "22": 12,
+    "23": 6,
+    "26": 0,
+    "5": 6
+  },
+  "scores": {
+    "2": 0.4372,
+    "20": 0.0018,
+    "22": 0.5098,
+    "23": 0.3244,
+    "26": 0.3296,
+    "5": 0.3701
+  },
+  "notes": [
+    "#5 定档：策略 3→6（无渠道级错误证据（1h 真实 210、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#23 定档：策略 0→6（无渠道级错误证据（1h 真实 85、渠道错误 0、去集中 0），延迟/小样本不单独降权）"
+  ],
+  "access_denied": [
+    20
+  ],
+  "ad_streak": {
+    "20": false
+  },
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 6,
+    "passes": {
+      "21": false
+    },
+    "streaks": {
+      "21": 0
+    },
+    "bottom": [
+      23,
+      26
+    ],
+    "dormant": [
+      26
+    ],
+    "base_skipped": [
+      20
+    ],
+    "base_lax": {},
+    "base": {
+      "total": 10.04,
+      "ttft": 3.291
+    },
+    "base_up": {
+      "n": 1,
+      "total": 6.53,
+      "ttft": 5.21
+    },
+    "bup_ids": [
+      23,
+      26
+    ],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 1,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "26": {
+        "disable": false,
+        "dormant_streak": 13,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 2,
+        "why": []
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

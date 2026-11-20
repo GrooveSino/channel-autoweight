@@ -1,7 +1,5 @@
-config.json
+bin/
+snaps/
 data/
-*.jsonl
-__pycache__/
-*.pyc
-examples/synthetic_snapshot.json
+config.json
 .env

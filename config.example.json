@@ -1,11 +1,15 @@
 {
-  "_comment": "channel-autoweight configuration. Every threshold lives here. Copy to config.json and fill in the site-specific values (or use AUTOWEIGHT_* environment variables).",
-  "ssh_host": "YOUR_SSH_HOST",
-  "pg_container": "YOUR_PG_CONTAINER",
+  "_comment": "reverix.ai gpt-* 渠道自动权重 v1 配置。所有阈值都在这里调。",
+  "ssh_host": "your-ssh-host",
+  "pg_container": "new-api-postgres",
+  "pg_user": "newapi",
+  "pg_database": "newapi",
   "model_like": "gpt-%",
   "exclude_model_like": "gpt-image-%",
-  "_comment_probe_token_ids": "token ids (logs.token_id) used by the probe key; their rows are excluded from real-user metrics. No key material here.",
-  "probe_token_ids": [],
+  "_comment_probe_token_ids": "token ids used for active probes; exclude these from real-user samples",
+  "probe_token_ids": [
+    0
+  ],
   "windows_min": [
     60,
     10
@@ -18,8 +22,9 @@
   "strategy": "rank",
   "strategies": {
     "rank": {
-      "_comment": "Rank-based tiers: leader gets top_w; score ratio >= close_ratio gets top_w*close_factor; >= mid_ratio gets mid_w; the rest low_w. All within tie_ratio -> uniform.",
-      "top_w": 12,
+      "_comment": "按排名分配：第一名 top_w；与第一名分数比 >= close_ratio 的拿 top_w*close_factor；其余 low_w。全员分数差 < tie_ratio 时平均分。",
+      "top_w": 20,
+      "_comment_top_w": "v4.64：12→20，拉大头部与中档差距，方便更细控流量；w_max 原本已是 20",
       "close_ratio": 0.85,
       "close_factor": 0.8,
       "mid_ratio": 0.7,
@@ -28,26 +33,39 @@
       "tie_ratio": 0.95,
       "hysteresis": 0,
       "band": 0,
+      "_comment_band": "v1.23 档位滞回：上一轮所在档位的门槛放宽 band、其他档位门槛收紧 band（0=关闭）",
+      "_comment_hysteresis": "v1.15：上一轮第一名分数在本轮第一名 hysteresis 比例内则保留第一（0=关闭）",
       "band_cap_aware": false,
+      "_comment_band_cap_aware": "v1.40：band>0 时把权重=软上限的渠道判为 close 档（修 v1.23 把 ECO 6 误判为 mid）；回放抖动更少但延迟略差，默认关",
       "ramp": 0,
+      "_comment_ramp": "v1.44 连续档位：>0 时 mid..close 之间线性插值权重、mid 以下 ramp 宽度内插值 low→mid（band=0 时生效；0=关闭）",
+      "_comment_tie_ratio": "v1.64：0.9→0.95。凌晨低流量时分数比常在 0.90 附近，0.9 会触发全员平均(6/6/6)，与 12/10 来回跳；回放 3/6/12h 体验指标不变、变化次数和变动量更少",
       "low_traffic": {
         "max_total_n60": 0,
         "close_ratio": 0.8
       },
+      "_comment_low_traffic": "v1.67：1h 全体样本和 < max_total_n60 时用这里的档位参数（0=关闭）",
       "lead_trust": 0,
-      "co_lead_ratio": 0
+      "_comment_lead_trust": "v1.85：第一名信任 < lead_trust 时，受信渠道（trust>=lead_trust）的档位比值改用受信渠道最高分做分母（封顶 1），防止低信任新恢复渠道领跑时把扛主流量的老渠道挤掉档；0=关",
+      "co_lead_ratio": 0,
+      "_comment_co_lead_ratio": "v1.88：第二名及以后分数比 >= co_lead_ratio 时也拿 top_w（并列第一，减少两强 12/10 互换抖动）；0=关",
+      "_comment_mid_ratio": "v1.99：0.6→0.7。#2 分数比常在 0.6–0.7（p50 是别人 3 倍）被给 mid 3，人工连续多轮改回 0；影子回放 6h/12h/24h p50/p90/exp_mr 都更好，3h 基本持平",
+      "lead_min_n": 0,
+      "lead_min_rich": 2,
+      "thin_lead_w": null,
+      "_comment_lead_min_n": "v2.43 小样本领跑参照：第一名 1h 真实请求 < lead_min_n 且至少 lead_min_rich 个样本充足渠道时，样本充足渠道按其中最高分定档（最好的拿 top_w），小样本渠道权重 ≤ thin_lead_w（null=不限）；0=关"
     },
     "proportional": {
-      "_comment": "Alternative strategy for comparison: weight proportional to score^gamma.",
+      "_comment": "对照策略：权重 ∝ 分数^gamma",
       "gamma": 2.0
     }
   },
   "score": {
-    "_comment": "score = (1-err)^err_exp * (1-slow) * latency_factor; latency_factor = t_ref/(t_ref + a*p50 + b*p90 + c*ttft). See README for every sub-feature.",
+    "_comment": "分数=(1-err)^2 * (1-slow) * 延迟因子；延迟因子 = t_ref/(t_ref + a*p50 + b*p90 + c*ttft)，ttft 为探测实测首字；v1.2：10m 内有错误时总分再乘 (1-err_10m)^err_10m_exp（n>=err_10m_min_n），快速避开正在出错的渠道；v1.3：shrink_k>0 时把小样本渠道的 p50/p90 向全体池化值收缩（回测未胜出，默认 0=关闭）",
     "t_ref": 20.0,
     "a_p50": 0.3,
     "b_p90": 0.3,
-    "c_ttft": 1.0,
+    "c_ttft": 1.5,
     "w_10m": 0.4,
     "min_n_window": 5,
     "ttft_missing_s": 30.0,
@@ -57,27 +75,42 @@
     "err_10m_min_n": 2,
     "shrink_k": 0,
     "exclude_probe_rows": false,
-    "empty_weight": 0,
+    "empty_weight": 2,
+    "empty_skip_user": true,
+    "empty_skip_user_max_s": 0,
+    "_comment_v459_empty_hung": "2026-11-02 09:15：>0 时 prompt_tokens=0 但耗时 ≥ 该秒数的挂起空回复重新算渠道空成功（09:10 日志审查发现 24h 56 条挂起空回复被当客户端问题跳过）。回测 data/bt_1102.json：关 24h 11.976/33.932/0.0063、12h 12.207/30.116/0.0095、6h 11.502/23.208/0.0238；60s 24h 12.035/34.105/0.0064、12h 12.187/29.797；90s 24h 12.031/34.077/0.0063、12h 12.187/29.797；150s 24h 12.036/34.128、12h 12.190/29.882；6h 全部持平。12h 更好但 24h 略差，未达到各窗口不更差，默认关（0）",
+    "_comment_v3_empty_skip_user": "2026-11-01：空成功里 prompt_tokens=0 的（客户端空请求，如令牌 1120/134 的 codex 会话）不再算渠道的空成功；24h 日志 1751 条空成功里 1728 条属此类。回测 24h p50 12.81→12.03、p90 37.14→34.57、错误 0.0165→0.0134、渠道侧空成功 0.0084→0.0072、TPS 27.38→28.66；12h 同向更好；6h 持平",
+    "empty_prior_k": 0,
+    "empty_recover_disc": 0,
+    "_comment_v298": "v2.98 empty_recover_disc：同令牌 90s 内在同渠道下一条就正常出字的空成功按 (1-disc) 计入空成功率（承接 v2.97 EMPTYRECOVER）。backtest rank 新 24h 快照 data/snap_v298.json，disc 0/0.5/1：24h p50/p90/err 9.277/28.337/0.002、9.330/28.560/0.004、9.185/28.328/0.004；12h 0/1 7.013/20.707→6.889/20.379（err 0.001 持平）；6h 7.785/20.375→7.609/20.733。p50 变好但 24h 错误率翻倍、6h p90 变差，0.5 全面更差 → 不启用，保持 0",
+    "_comment_v282": "v2.82：empty_weight 0→2（回测 24h/12h/6h 的 p50/p90/慢请求/空成功都更好，24h 错误率 0.007→0.008 持平）；empty_prior_k=空成功率向池化值收缩 (empty+k*pool)/(n+k)，回测 k=50/200 都更差，默认 0 关闭",
     "probe_fail_penalty": 0.5,
+    "_comment_v18": "v1.8：empty_weight=空成功(type=2且completion_tokens=0)计入坏请求率的系数（回测 0.5/1/2 互有胜负，默认 0 关闭）；probe_fail_penalty=本轮探测全部失败时总分乘数（0.5；回测中性，用于 #14 这类 200 空回复）",
     "len_norm": {
       "enabled": false,
       "min_ct": 100,
       "ref_ct": 500,
       "min_n": 5,
-      "mix": 1.0
+      "mix": 1.0,
+      "_comment": "v1.22 长度归一化延迟：use_time 按输出 token 折算成输出 ref_ct token 的等效秒数，避免把'用户要的输出长'误判成'渠道慢'"
     },
     "w10_n0": 0,
+    "_comment_v127": "v1.27：w10_n0>0 时 10m 窗口权重 = w_10m × n10/(n10+w10_n0)（样本自适应，默认 0 关闭）",
     "cmp_guard": {
       "enabled": false,
       "min_ctok": 60,
-      "ratio": 0.25
+      "ratio": 0.25,
+      "_comment": "v1.30 工作量可比性护栏：窗口输出 token 中位数 < max(min_ctok, ratio×同伴最大) 时，延迟换成可比同伴池化值（中性），避免短请求让渠道显得快"
     },
     "buffer_prob": {
       "enabled": false,
       "prior_a": 0.3,
       "prior_b": 1.7,
       "half_life_h": 6.0,
-      "max_age_h": 48
+      "max_age_h": 48,
+      "since": "2026-10-30T14:54:00+08:00",
+      "_comment_v307": "v3.07：since 之前的历史探测不计入缓冲概率（v3.03 前 Caddy gzip 造成假缓冲判定）",
+      "_comment": "v1.31 整段缓冲概率：Beta 后验+指数衰减估计当前缓冲概率 p，分数 ×(1-(1-nonstream_penalty)·p)，代替单次探测 0/1 判定"
     },
     "slow_burst": {
       "enabled": true,
@@ -85,76 +118,155 @@
       "peer_min_nn": 5,
       "ratio": 2.5,
       "floor": 0.2,
-      "exp": 1.0
+      "exp": 1.0,
+      "_comment": "v1.36 突发变慢：10m 长度归一化 np50 > ratio×同伴 1h 归一化 np50 中位数（10m nn>=min_nn）时分数×max(floor, ratio×ref/np50)^exp"
     },
     "conf_k": 0,
+    "_comment_v138": "v1.38 小样本置信折扣 score×n60/(n60+conf_k)；影子回放 6/12/24h p90 全部变差（k=3: 32.98→33.80 / 41.15→41.37 / 41.99→42.27），默认 0=关闭",
     "conc_k": 0,
     "conc_c0": 2.0,
+    "_comment_v139": "v1.39 并发负载折扣：10m 平均并发 > conc_c0 时分数 ×1/(1+conc_k×(conc10−conc_c0))；默认 conc_k=0 关闭",
     "w10_good_n0": 0,
+    "_comment_v142": "v1.42 非对称 10m 权重：10m 比 1h 好时 w_10m×n10/(n10+w10_good_n0)，变差照常全权重；影子回放 6h 略好、12/24h p50/p90 略差，默认 0 关闭",
     "workload_match": {
       "enabled": true,
       "mix": 0.3,
-      "min_n": 5
+      "min_n": 5,
+      "_comment": "v1.52 延迟项 = (1-mix)×原始 + mix×工作量匹配比×全体池化 p50/p90（features.matched_ratios）；影子回放 3/6/12h exp_mr 1.092/1.123/1.094→1.082/1.098/1.073、变化次数 23/42/87→20/34/74、p50 6/12h 略好，原始 p90 +0.7~3.7%（偏向短活渠道的旧口径），mix=0.3 上线；mix=1.0 原始 p90 +3~8% 未采用"
     },
     "log_ttft": {
       "enabled": true,
       "mix": 0.5,
-      "min_n": 10,
-      "adapt_full_n": 30
+      "min_n": 6,
+      "_comment": "v1.53 首字项 = (1-mix)×探测首字 + mix×1h 日志首字 p50（frt_version=2，n≥min_n）；影子回放 2/3/6h exp_mr 0.955/1.043/1.057→0.945/1.035/1.054，p50/p90 略好，变化 16→14；mix 1.0 更好(0.930/1.024)但日志首字只有 18:45 起约 2.4h，先上 0.5，攒够 6h 再评 1.0",
+      "adapt_full_n": 30,
+      "_comment_v175": "v1.75 adapt_full_n：日志首字样本 n 从 min_n 到 full_n 时 mix 从 0.5 线性升到 1.0。回放 3/6/12/24h(--evolve-trust --inject-mr --matched) off→30：exp_mr 1.046/1.011/1.022/1.061→1.034/1.003/1.019/1.058，moved 329/587/779/1365→255/527/733/1267，p50 3h +0.06 其余略好，p90 12h +0.19 其余略好，err +0.01~0.05pp；多数更好，启用",
+      "probe_calib": {
+        "enabled": false,
+        "min_peers": 2,
+        "max_ratio": 5.0,
+        "_comment": "v2.38 日志首字不足渠道的探测首字按样本充足渠道日志/探测比中位放大（小样本偏置）"
+      },
+      "thin_pool_k": 20,
+      "_comment_v286": "v2.86 thin_pool_k：日志首字样本<min_n 的渠道首字向样本充足渠道日志首字中位收缩 (n*t+k*pool)/(n+k)。回放 shadow_replay --inject-mr --evolve-trust 0→20：24h rich_p50/p90 12.093/33.676→12.065/33.644；12h 12.957/35.970→12.935/35.868、thin_w 0.137→0.136；6h 13.645/37.887→13.633/37.630、thin_w 0.214→0.193；3h rich_p90 31.42→31.25 但 p50 11.54→11.65、thin_w 0.346→0.293；错误不变；k=40 不如 20。多数更好，启用 20",
+      "_comment_v292": "v2.92 min_n 10→6：日志首字 6 条起就参与（小样本渠道少靠探测首字冲第一）。shadow_replay --inject-mr --evolve-trust，rich_p50/p90 10→6：24h 12.114/33.645→12.100/33.641；12h 13.555/36.751→13.536/36.687；6h 12.715/32.612→12.633/32.392；exp_* 三窗也都更好；15 三窗都更差。同轮复测 thin_pool_k 10/20/30，20 仍最好（30 持平），维持 20"
     },
     "client_err": {
       "enabled": true,
+      "_comment": "v1.58 打分/信任的错误口径去掉客户端错误（上游 4xx，408/429 除外：400 参数错、413 太大等是用户请求问题，不是渠道故障）；原值存 n_raw/err_raw/err_rate_raw",
       "mode": "cross_channel",
-      "min_ch": 2
+      "min_ch": 2,
+      "_comment_v171": "v1.71 mode=cross_channel：只去掉 60m 内同一令牌在 >=2 个渠道都出现的客户端错误（错误跟着用户走，如会话被安全策略屏蔽 403、内容审计 400）；mode 缺省=全部 4xx（v1.58，回放更差）。回放 3/12/24h 与关闭完全相同，6h exp_mr 1.071->1.049，原型已启用",
+      "follow_5xx": false,
+      "_comment_v249": "v2.49 follow_5xx：同一令牌在 >=2 个渠道出现的非超时/非限流 5xx 错误也算错误跟着用户走（如 502 'No tool call found for function call output'）。回放 3/6/12/24h（对照 replay_raw）exp_err/exp_p90 全部更差（3h exp_err 0.0016->0.0091、p90 35.6->36.5），默认关，未启用",
+      "session_block": false,
+      "_comment_v312": "v3.12 session_block：会话级安全策略屏蔽 403（db sb=1，'请开启新会话'）也计入 err_user 从打分/信任错误里去掉（补 cross_channel 漏掉的黏性单渠道会话）。回测 snap_v312（24h，含 17 条 sb，全在 21:12–21:24 #22）24/12/6/3h 与关闭完全相同（事件之后还没有结果小时），默认关，未启用；待有事后数据复测"
     },
     "err_recover": {
       "enabled": false,
       "span_s": 60,
       "min_ok": 10,
-      "keep": 0.3
+      "keep": 0.3,
+      "_comment": "v1.72 短突发错误（首末跨度 ≤ span_s 秒）且之后已有 ≥ min_ok 条成功 → 这次突发只按 keep 计入错误率（打分+信任）；持续故障/未恢复不打折"
     },
-    "timeout_slow": false
+    "timeout_slow": false,
+    "_comment_v179": "v1.79 timeout_slow：超时类错误（524/504/408）同时计入慢率（失败+白等约 100s）。2026-10-26 15:58 回测 24h 与关闭完全相同（超时渠道已因错误率排在末位），默认关",
+    "_comment_v211": "v2.11 c_ttft 1.0→1.5：连续两轮 TTFTTOP（系统首位 #2 日志首字 9–10s，#23 3.3s 最好）。回放 shadow_replay --evolve-trust --inject-mr --matched 1.0→1.5：3h p50 14.02→13.99、p90 41.92→42.04、exp_mr 0.990→0.985；6h 12.20→12.08、35.97→35.86、0.958→0.954；12h 11.83→11.69、34.35→33.94、0.973→0.969；24h 13.09→13.02、38.36→38.08、1.0631→1.0610；错误不变、变化次数相当。2.0 在 12/24h 不如 1.5。启用 1.5",
+    "drop_probe_mismatch": {
+      "_comment": "11-01：决策特征去掉测试令牌打到渠道未开模型的 404（not available for this group，如站点测试用 gpt-6.1-sol 打只开 gpt-6-astra 的 #28）；真实用户的仍保留。需回测。11-01 19:03 回测：12h/6h 真实用户 p50/p90/错误/空/TPS 完全不变（11.231/35.706、10.638/32.615），#28 假错误 6→0、建议 0→2，启用",
+      "enabled": true
+    },
+    "drop_probe_hung": {
+      "_comment": "v2.63：决策特征去掉自家探测令牌的挂死空成功（type=2、0 token、use_time>=slow_s）；探测 5xx/429 仍保留。需回测",
+      "enabled": false
+    },
+    "token_gate": {
+      "enabled": false,
+      "max_share": 0.8
+    },
+    "_comment_v290": "v2.90 复测 shrink_k（p50/p90 小样本收缩，针对 THINSTREAK）：当前配置下 shadow_replay --inject-mr --evolve-trust，k=0/10/30 的 rich_p50/p90：24h 12.114/33.645→12.206/33.942→12.315/34.508；12h 13.248/36.732→13.398/37.209→13.506/37.811；6h 13.259/35.554→13.378/35.973→13.458/37.152；thin_w 下降但样本足够渠道体验全部变差，维持 0 关闭",
+    "empty_tok_cap": 0,
+    "_comment_v295": "v2.95：empty_tok_cap=每令牌最多计 cap 条空成功（按令牌去重，防一个会话反复空回复冤枉渠道）；回测 24h/12h cap=1/2/3 rank p50/p90 都更差、6h 持平，默认 0 关闭",
+    "real_first": {
+      "min_real": 0,
+      "_comment": "v3.22：60m 真实请求>=min_real 的渠道决策特征去掉探测日志、不足时探测兜底。回测 snap_v322 24h rank p50/p90 12.58/31.31→(10)12.11/30.51、12h 11.83/30.07→11.43/27.88，但 6h p90 20.61→23.00、snap_v312 24h 12.68/32.46→13.64/33.29，互有胜负，默认 0 关"
+    },
+    "probe_shrink": {
+      "k": 0,
+      "min_real": 10,
+      "_comment": "v3.23 小样本渠道 p50/p90 按真实请求条数向样本充足渠道真实请求池化值收缩 (n_real*p+k*pool)/(n_real+k)；k=0 关"
+    },
+    "tps": {
+      "enabled": false,
+      "window_min": 60,
+      "min_ct": 50,
+      "min_ut": 3,
+      "min_model_n": 10,
+      "min_n": 20,
+      "lo": 0.5,
+      "hi": 1.5,
+      "exp": 0.5,
+      "flag_idx": 0.7,
+      "_comment": "v4.02 TPS 打分项：端到端 TPS=completion_tokens/(use_time+0.5)（use_time 是截断整秒，+0.5 取中点），只用真实用户、type=2、流式（is_stream 列）、ct>=min_ct、use_time>=min_ut 的请求；每条除以同模型全体中位数（模型样本<min_model_n 用全体中位）后取渠道中位数=idx；分数×clamp(idx,lo,hi)^exp（n>=min_n）。不用 ct/(use_time-frt)：frt 是首个可见内容时间（毫秒），completion_tokens 含其之前的推理 token，且 37% 缺失。flag_idx：idx 低于它出 TPSLOW 诊断",
+      "_comment_v402": "回测 cmd/awbacktest（24h 原始日志 data/bt_tps.json，15 分钟一步、下一小时真实请求按份额加权，无探测/信任）：关 24h p50/p90/err 12.055/34.423/0.0154、12h 11.249/36.476/0.0243、6h 9.956/26.263/0.0480；exp0.5 min_n20：11.912/33.556/0.0151、10.820/34.665/0.0249、9.884/27.046/0.0470；其余 exp 0.3/1.0、min_n 10、hi=1 组合 p50 普遍更好但错误率 12h/6h 全部更差。6h p90 与 12h 错误率变差，未达到不更差，默认关，只作诊断（features.tps + TPSLOW）",
+      "_comment_v403": "2026-11-01 12:56 用新 24h 日志（data/bt_1101b.json，含 empty_skip_user）重跑：关 24h 12.036/37.818/0.0140、12h 15.496/44.581/0、6h 12.747/44.653/0；开 exp0.5 min_n20 24h 11.831/37.565/0.0113、12h 15.570/45.051、6h 12.624/45.148；min_n10 24h 11.632/37.730/0.0116、12h 15.360/45.068、6h 12.322/44.741；exp0.3/1.0、hi1.2、lo0.7 同样 24h 全面更好但 12h p90 都差约 0.4–0.7s。仍未达到各窗口不更差，继续默认关"
+    }
   },
   "min_n_rank1": 10,
-  "error_alert": {
-    "rate": 0.2,
-    "min_n": 20
-  },
   "soft_caps": {
-    "_comment": "Per-channel soft caps {channel_id: {cap, enabled, reason, relax}}. A capped channel is flagged as a quality risk."
+    "_comment": "optional per-channel weight caps; keys are channel ids",
+    "1": {
+      "cap": 20
+    }
   },
   "probe": {
-    "_comment": "Active first-token probe through the public gateway. The key comes from AUTOWEIGHT_PROBE_KEY, a local key file, or a remote key file; it is never logged.",
+    "remote_site": true,
     "enabled": true,
-    "base_url": "https://your-gateway.example.com",
+    "base_url": "https://example.com",
     "path": "/v1/responses",
-    "model": "YOUR_PROBE_MODEL",
+    "model": "gpt-6.1-sol",
     "n_per_channel": 1,
     "timeout_s": 90,
-    "prompt": "Write about 200 words explaining why the sky is blue. Output the text only.",
+    "prompt": "请用中文写约 200 字，介绍为什么天空是蓝色的。直接输出正文。",
     "key_paths_local": [
-      "~/.config/channel-autoweight/probe_key"
+      "~/.probe_key"
     ],
-    "key_path_remote": "",
+    "key_path_remote": "~/.probe_key",
+    "count_path": "~/.probe_count",
     "recheck": {
+      "_comment": "v1.4：单次探测首字 > ratio×最近 history 轮中位数 且 > min_s 秒（或探测失败）时复测一次，取较小值；过滤偶发尖峰",
       "enabled": true,
       "ratio": 2.0,
       "min_s": 8.0,
       "history": 3,
       "min_hist": 2
-    }
+    },
+    "hard_timeout_s": 100,
+    "budget_s": 150,
+    "_comment_v500": "v5.00：单次探测硬超时 hard_timeout_s（ssh+远端脚本，远端脚本另有总时长截止）；整轮探测预算 budget_s（站点探测+复测+停用渠道直测共用），用完后剩余探测直接记 probe_budget_exceeded，不再挂住整轮（11-18 15:54/16:48 两轮因 #5 直测每次 50-105 秒、3 次串行而超时）"
   },
   "recovery": {
-    "_comment": "Observation cap for a channel that just resumed streaming after buffered rounds.",
+    "_comment": "v1.11：探测连续 >= min_streak 轮整段缓冲后首次恢复真流式的渠道，本轮权重上限 cap（观察一轮，下轮仍流式自动解除）。2026-10-24 13:10 回测中性（历史无恢复事件），按规则默认关闭，仅记录 rounds.recovering 供后续评估",
     "enabled": false,
     "min_streak": 2,
     "cap": 6
   },
   "rounds_file": "data/rounds.jsonl",
+  "diag": {
+    "_comment_v304": "v3.04：buffer_since 之前的正式轮探测缓冲判定不计入连续缓冲/恢复/休眠诊断（v3.03 前 Caddy gzip 造成假缓冲）",
+    "buffer_since": "2026-10-30T14:54:00+08:00",
+    "probe_sample": {
+      "_comment": "v3.21 PROBESAMPLE：系统给权重≥min_w、且 1h 样本里探测令牌占比≥min_share 的渠道及其合计权重份额（打分证据来自探测短请求；只记录）",
+      "min_share": 0.8,
+      "min_w": 1
+    }
+  },
   "watch": {
-    "_comment": "Watch list: disabled/suspicious channels that are probed and reported only (no scoring, no writes).",
+    "_comment": "v1.13：观察名单（禁用渠道也探测+统计，仅记录，不打分不写库；是否启用由 Groove 决定）；v1.51 加入 #5（Groove 2026-10-25 19:40 手动禁用）；v1.94 auto_skip：禁用渠道交给启停直连测试，已启用且 1h≥30 条的不再额外探测（新渠道/刚重新启用的仍补探测）",
     "enabled": true,
-    "ids": [],
+    "ids": [
+      21
+    ],
     "n_probe": 2,
     "criteria": {
       "max_ttft": 10.0,
@@ -163,11 +275,13 @@
       "max_empty": 0.05
     },
     "probe_disabled": false,
+    "_comment_v160": "v1.60：#14 已被 Groove 删除，移出观察名单；禁用渠道默认不探测（站点 403），suggest_enable=None",
+    "_comment_v183": "v1.83：#21 2026-10-26 18:18 被 Groove 禁用，加入观察名单（只统计，不启用）",
     "auto_skip": true,
     "auto_skip_min_n60": 30
   },
   "trust": {
-    "_comment": "Trust: slow rise, fast fall. Bad events multiply trust by (1-down*severity); clean rounds add up*min(1, n60/up_full_n); score *= floor+(1-floor)*trust.",
+    "_comment": "v1.18 信任慢涨快跌（Groove 2026-10-24 19:54 原则）。坏事件 trust×(1-down×severity)，干净轮 +up×min(1,n60/up_full_n)；分数×(floor+(1-floor)×trust)。enabled=false 时只记录",
     "enabled": true,
     "t_init": 0.6,
     "t_min": 0.1,
@@ -187,13 +301,17 @@
     "slow_bayes": false,
     "slow_prior_a": 0.8,
     "slow_prior_b": 9.2,
+    "_slow_bayes": "v1.29：1h 慢请求事件按后验 P(真实慢率>slow_thr) 分级（0.5→1 映射到 slow_sev），先验 Beta(a,b)；影子回放决策中性/略混合，默认关",
     "source": "shadow",
     "shadow_max_age_min": 15,
+    "_source": "v1.43：正式轮信任从最近影子点（<=shadow_max_age_min 分钟）按影子去重规则接续，过旧/缺失回退 rounds。ops/trust_source_eval.py 22 轮对照：之后 20/45/90 分钟 p50/p90/错误率全部更好，上线",
     "t_new": 0.3,
-    "err_10m_full_n": 0
+    "_t_new": "v1.47：新渠道（无信任记录，如 #21/#22）从 0.3 起步，慢涨快跌",
+    "err_10m_full_n": 0,
+    "_err_10m_full_n": "v1.73：10m 错误严重度按 min(1,n/full_n) 缩放（小样本 1/2 不打满分）；回放 3/6h 体验相同、12h exp_mr 更差、24h 持平，默认 0 关"
   },
   "shadow": {
-    "_comment": "Shadow mode: compute suggestions every interval_min minutes, read-only, never writes to the DB.",
+    "_comment": "v1.19 影子模式：每 interval_min 分钟只读算一次建议权重（不写库）。probe_window_min 内真实请求 < min_real_n 才探测，同渠道 probe_cooldown_min 内最多一次；首字复用 ttft_max_age_min 内最近探测；trust 独立演进，severity×min(1,gap/sev_gap_min) 去重叠",
     "interval_min": 5,
     "min_real_n": 3,
     "probe_window_min": 10,
@@ -203,65 +321,88 @@
     "file": "data/shadow.jsonl",
     "backfill": true,
     "backfill_max_min": 360,
+    "_comment_v121": "v1.21：空档（box 冻结）后下一次运行先按时间点回放补齐（backfill=true，不探测，单次只读查询），最多 backfill_max_min 分钟",
     "sev_gap_long_min": 60,
     "probe_once": true,
+    "_comment_v132": "v1.32：探测事件（缓冲/全部失败）只在探测是新证据时计一次，复用旧探测不重复扣信任",
+    "_comment_v128": "v1.28：1h 窗口坏事件（1h 慢请求/1h 错误率）在影子里按 gap/60 去重叠（之前按 gap/10，同一批慢请求每 5 分钟重复扣信任）；10m/探测事件仍按 gap/10",
     "watch_ttft_fallback": false,
-    "upstream_ttft_add_s": 1.5
+    "upstream_ttft_add_s": 1.5,
+    "_comment_v193": "v1.93：watch_ttft_fallback=true 时，渠道当轮不在正式探测里（禁用中/刚重新启用）就复用观察名单探测，再退到启停直连上游测试（首字+upstream_ttft_add_s）；默认关（A/B 只在 01:40 让 #5 0→3，样本不足以证明更好）"
   },
   "score_smooth": {
-    "_comment": "Asymmetric score smoothing (worse follows immediately, better rises slowly). Off by default.",
+    "_comment": "v1.24 分数非对称平滑：变差立即跟(alpha_down)，变好慢涨(alpha_up)；用于 1–5 分钟调权重，0/false 关闭",
     "enabled": false,
     "alpha_up": 0.5,
     "alpha_down": 1.0
   },
   "rise_confirm": {
-    "_comment": "Weight increases need confirmation by the last n shadow suggestions. Off by default.",
     "enabled": false,
     "n": 3,
-    "max_n60": 0
+    "_comment": "v1.34 升权确认：降权立即跟，升权要最近 n 个影子时间点原始建议都支持（否则升到其中最小值）；默认关",
+    "max_n60": 0,
+    "_comment_max_n60": "v1.35 >0 时只对 1h 样本 < max_n60 的小样本渠道做升权确认（大流量渠道照常立即升）；0=对所有渠道"
   },
   "trust_cap": {
-    "_comment": "Low-trust cap: channels with trust < thr (and 1h samples < max_n60) get at most cap.",
+    "_comment": "v1.46 低信任限幅：trust<thr 的渠道权重不超过 cap（把人工'压住刚恢复的渠道'做成规则）",
     "enabled": true,
     "thr": 0.3,
     "cap": 3,
-    "max_n60": 20
+    "max_n60": 20,
+    "_comment_v161": "v1.61：max_n60>0 时只对 1h 样本 < max_n60 的低信任渠道限幅（低流量时几条好请求不足以推翻刚出过的故障）；thr 0.3/cap 3/max_n60 20 回放 3/6/12h 全胜，已启用"
   },
   "newcomer": {
-    "_comment": "Newcomer cap: channels are discovered from the DB; a channel stays 'new' until it has enough formal rounds and real traffic, capped at cap with an exploration floor explore_w.",
+    "_comment": "v1.47 新渠道限幅：渠道集合从库自动发现（status=1 且有 gpt-* ability，不写死 id）；1h 真实用户请求（去 probe_token_ids）< min_real_n60 时权重 ≤ cap，攒够真实流量后自动解除；新渠道=在正式写库轮中出现 < min_rounds 次（自动发现，不写死 id）",
     "enabled": true,
     "min_real_n60": 30,
     "cap": 6,
     "min_rounds": 4,
     "reset_gap_rounds": 0,
     "explore_w": 2,
+    "_comment_v189": "v1.89：新渠道限幅期内且 1h 0 错误时权重至少 explore_w（防新渠道饿死）；0=关",
+    "_comment_v184": "v1.84：reset_gap_rounds>0 时，渠道在连续 ≥N 个正式写库轮中缺席（禁用）后重新出现，重新按新渠道限幅（1h 真实请求 < min_real_n60 时权重 ≤ cap）；0=关",
     "max_age_h": 0,
-    "graduate_real_n60": 30
+    "graduate_real_n60": 30,
+    "_comment_v197": "v1.97：>0 时新渠道/重新启用渠道须在某个正式轮里 1h 真实请求（mix_60m.n_user）≥ 该值才转正，否则继续限幅 cap + 探索底线（对齐 Groove 规则）；回放 3h/6h/12h p50 更好、exp_mr 6h/12h 更好、p90 6h/12h 略差 0.04–0.08s，已启用；0=关",
+    "_comment_v193": "v1.93：max_age_h>0 时首次/重新出现在正式轮不满该小时数的渠道仍算新渠道（限幅+探索底线）；回放 6h/24h p50/p90 略差、错误率略好，默认 0 关",
+    "reenable_from_toggle": true,
+    "_comment_v223": "v2.23：自主启停重新启用（rounds toggle.applied op=enable）的渠道从该轮起重新按新渠道处理（限幅 cap + 探索底线 explore_w，1h 真实请求满 graduate_real_n60 转正）；false=关"
   },
   "capacity": {
-    "_comment": "Known concurrency limits {channel_id: {max_conc, reason}}: cap the traffic share against the estimated peak total concurrency.",
+    "_comment": "v1.48 已知并发容量的渠道：按估计高峰总并发限制流量份额，防止排队",
     "enabled": true,
     "peak_factor": 2.0,
-    "r_mode": "rest"
+    "r_mode": "rest",
+    "_comment_v157": "v1.57 r_mode=rest：R=去掉该渠道后其余渠道重排的目标权重和（旧 first 口径在它排第一时 R 过小，cap 循环过紧 ~1.3）；回放 6/3/1.5h exp_mr 1.043/1.055/1.064→1.039/1.049/1.053，p90 41.3/48.3/51.0→40.7/47.1/48.5，错误略降，变化数相同"
   },
   "log_stream_veto": {
-    "_comment": "Veto a probe 'buffered' verdict when real streaming traffic in the logs shows the channel streams fine.",
     "enabled": true,
     "min_n": 20,
     "max_buf": 0.2,
-    "scope": "both"
+    "_comment": "v1.56 探测判整段缓冲但 1h frt_version=2 真实流量（内容块≥5）里一次性吐出（内容跨度<0.3s）占比 ≤ max_buf 且样本 ≥ min_n → 否决缓冲判定：不扣 nonstream_penalty、不记信任缓冲事件、首字只用日志 p50",
+    "scope": "both",
+    "_v169": "v1.69 2026-10-26 08:4x 启用（scope=both）：回放 1.5/3/6h p50/p90/exp_mr 明显更好（3h p50 13.72→13.12 p90 40.27→38.59 exp_mr 1.265→1.177），12/24h 持平（延迟差 ≤0.5%，错误率更低、变动更少）；trust/score 单边否决不如 both"
   },
   "small_sample": {
-    "_comment": "Cap any channel with too few real 1h requests. Off by default.",
+    "_comment": "v1.76 小样本限幅：任何渠道 1h 真实用户请求 < max_n60 时权重 <= cap（默认关，回放决定）",
     "enabled": false,
     "max_n60": 20,
     "cap": 3
   },
+  "thin_cap_gap": {
+    "_comment": "v2.46 诊断 THINCAPGAP：系统给 1h 真实请求 < min_n 的渠道建议权重 > cap 时提示（对齐 newcomer.graduate_real_n60=30 / 人工上限 6）；补 THINSHARE min_n=15 漏掉的 15≤n<30；只记录，并触发 THINBLEND 折中参考",
+    "min_n": 30,
+    "cap": 6,
+    "est_n": 60,
+    "est_hours": 24,
+    "_est_comment": "11-02 08:29：老渠道判定窗口 6h→24h。#26 01:02 峰值 122 在 08:29 滑出 6h 窗口，GUARDED 把老渠道当新渠道套慢加量上限（6→3 thin）；低峰常超过 6h，判定应粘住一天"
+  },
   "reenable": {
-    "_comment": "Diagnostics for disabled channels the operator allowed to be re-attached {channel_id: {disabled_at, vendor?, ...}}. Diagnostics only."
+    "_comment": "v1.81：Groove 授权合适时重新接入的禁用渠道（只诊断，启用由我人工核对后执行）",
+    "_comment_v183": "v1.83：upstream_probe=true 时在生产机内直连上游探测（key 不离开生产机），同供应商渠道全禁用时作为恢复证据"
   },
   "toggle": {
-    "_comment": "Autonomous on/off: suggest disabling persistently worst / erroring channels and re-enabling recovered ones, with floors min_enabled / hard_min.",
+    "_comment": "v1.90：自主启停（Groove 2026-10-26 23:50 授权）；只判断与记录，启停写库由我人工复核后执行。禁用渠道从库自动发现，每轮直连上游 n_test 次",
     "enabled": true,
     "need_streak": 3,
     "n_test": 3,
@@ -279,6 +420,127 @@
     "baseline_mode": "site",
     "skip_buffered_ttft": true,
     "min_log_n_buffered": 2,
-    "err_probe_fail": true
-  }
+    "_comment_v200": "v2.00：整段缓冲的站点探测首字=总耗时，不再当后 1/3 首字基准；改用日志 lt50(lt_n≥2)→同口径直连首字中位→不参与（只影响启停判定）",
+    "_comment_v195": "v1.95：后 1/3 渠道同口径直连测试（upstream_baseline），两种口径都记录；baseline_mode=site 仍用旧口径判定，攒几轮对照后再决定是否切 upstream",
+    "err_probe_fail": true,
+    "unusable_ttft_s": 30.0,
+    "unusable_disable": false,
+    "_comment_v202": "v2.02：持续报错禁用计数也算站点探测（含复测）全部失败的轮；并修复 v1.96 起本轮 err60 丢失（只影响启停判定）",
+    "retired": [],
+    "recovered_exempt": true,
+    "_comment_v216": "v2.16：持续报错禁用前，若本轮站点探测全部成功且真流式（已恢复），1h 错误率只是滞后窗口，暂不禁用（只影响启停判定）",
+    "skip_dormant_base": true,
+    "_comment_v280": "v2.80：重新启用的后 1/3 基准排除本轮站点探测全部整段缓冲、或旧权重 0 且 1h 真实 <min_n60 的休眠渠道（原因记 toggle.base_lax，base_skipped 仍只放 int）；排除后不足 k 个有几个用几个，全被排除才退回。回放最近 30 个正式轮：25 轮后 1/3 换人，3 轮判定由达标改为不达标（10-28 23:34 #21、10-29 11:35 #20、21:19 #21），没有一轮变宽松（只影响启停判定）",
+    "skip_nodata_base": true,
+    "_comment_v309": "v3.09：后 1/3 基准再排除本轮没有成功站点探测、且 1h 真实 <min_n60 的渠道（刚重新启用还没数据，score 0 落进后 1/3 却不贡献基准，等于把基准拉松）；原因记 base_lax=nodata（只影响启停判定，只会更严）",
+    "dormant_rounds": 6,
+    "dormant_max_w": 2,
+    "acct_disable": {
+      "enabled": true,
+      "min_real_err": 1,
+      "exempt": [
+        26
+      ],
+      "_comment": "v2.58：ACCTSTREAK 降 0 后连续 2 个正式轮仍账号级错误、且 1h 真实用户也报错时，按持续报错规则给出禁用 action（守底线；写库仍须 --apply-toggle）",
+      "real_err_lookback_min": 180
+    },
+    "_comment_v241": "v2.41：休眠诊断 DORMANT——启用渠道连续 ≥dormant_rounds 个正式轮站点探测全部整段缓冲、旧权重 ≤dormant_max_w、1h 真实 <min_n60；现有排名/报错禁用规则覆盖不到，只记录不禁用（缓冲不在授权禁用条件里），并给出扣掉后的能用启用数 n_live_after",
+    "err_real_only": true,
+    "_comment_v288": "v2.88：持续报错禁用只算真实用户错误（1h 错误率去掉 probe_token_ids，站点探测失败不计入 streak，仍记 err_streak_src 诊断）；acct_disable.exempt（#26）覆盖所有禁用路径（只影响启停判定，不改打分）",
+    "trend_since": "2026-10-30T14:12:00+08:00",
+    "dormant_w_max": 1,
+    "base_real_log": true,
+    "_comment_v332": "v3.32：dormant_w_max=1 旧权重≤1 且 1h 真实<min_n60 也算休眠、排除出后 1/3 基准；base_real_log 1h 真实<min_log_n 的基准渠道不用日志 p50/lt50（那是探测行，小样本偏置把基准拉严到 2–3s）。回放 10-30 14:12 起 27 个正式轮：基准变化 10 轮（总耗时去掉探测行重复计、全部变松到真实/探测口径），9 次禁用渠道测试判定无翻转（只影响启停判定）",
+    "rank_needs_fault": true,
+    "rank_fault_min_n": 30,
+    "rank_fault_min_err": 3,
+    "rank_fault_err": 0.03,
+    "_comment_v500": "v5.00：连续倒数第一只在本小时有真实渠道故障时才建议停用（真实≥30、去集中错误≥3 且≥3%）；真实错误≈0 只是更慢的渠道只记诊断",
+    "_comment_retired5": "2026-11-19 23:3x 加入 retired；2026-11-20 02:37 #5 [ECO]-GPT-0.15 已被主站按 Groove 指示删除，从 retired/watch/soft_caps 移除"
+  },
+  "thin_orphan": {
+    "_comment": "v2.47 诊断 THINORPHAN：系统给小样本正权重却把大样本清零时，报告被清零主力 1h 真实流量占比；与 THINSHARE 互补；触发时配合 OVERRIDE-HINT；只记录",
+    "min_n": 15
+  },
+  "thin_blend": {
+    "_comment": "v2.25/v2.46/v2.47/v2.48 THINBLEND 分步折中；v2.48 轻微错误用 err_step 分步降（避免小样本偏置把主力清零），错误率≥err_rate_hi 仍直接跟降；触发时打印 OVERRIDE-HINT；只记录",
+    "step": 2,
+    "min_n": 15,
+    "err_rate_hi": 0.05,
+    "err_step": 4,
+    "bulk_hold_n": 30,
+    "real_n": true,
+    "_comment_v317": "v3.17 THINBLEND 小样本/主力判定用 mix_60m.n_user（去探测令牌）；false 回到旧口径",
+    "_comment_v316": "v3.16 系统升权的全是小样本时，1h≥bulk_hold_n 且零错误的干净主力在 THINBLEND 里保持原权重不分步降（只影响参考/OVERRIDE-HINT，不参与打分）；0 关"
+  },
+  "long_prior": {
+    "_comment": "v3.06 小样本长窗口先验：1h 真实<min_n60 且 6h 真实明显差于同伴（THINLONG contradicted）时限幅 cap（默认关，回测决定）",
+    "enabled": false,
+    "long_min": 360,
+    "min_n60": 30,
+    "min_long_n": 30,
+    "tol": 1.1,
+    "cap": 2,
+    "_comment_1950": "2026-10-30 19:55 第三次复测（snap_1950，31h）：cap=2/0 的 p90 在 24/12/6h 全部变差（33.33→34.10、37.15→38.66、40.17→43.69），维持关闭；三快照结论翻转，暂停逐轮复测"
+  },
+  "apply_drift_tol": 2,
+  "_comment_apply_drift_tol": "v3.18：--final 下跟随渠道 |重算-期望|<=2 且两边非 0 的抖动不阻断写库；跨 0 照旧阻断",
+  "long_ctx_cap": {
+    "_comment": "v3.30 长上下文坏结果限幅：long_min 内真实日志按 prompt_tokens 分档，大档 LONGCTX（坏率>=flag_rate、n>=min_n、>=ratio×短档）且 1h 真实 < max_n60 的渠道权重 <= cap（默认关，回测决定）",
+    "enabled": false,
+    "long_min": 360,
+    "edges": [
+      50000,
+      150000
+    ],
+    "min_n": 3,
+    "flag_rate": 0.4,
+    "ratio": 2.0,
+    "max_n60": 30,
+    "cap": 2
+  },
+  "rank1_real": {
+    "_comment": "v3.35 首位资格：1h 真实（非探测令牌）请求 < min_real 的渠道不得排第一（由下一个合格渠道顶上）；0=关，回测决定",
+    "min_real": 0
+  },
+  "main_zero": {
+    "_comment": "v4.65：把 MAINZERO/GUARDED 干净主力不降 写进系统目标。1h 真实>=min_n 且错误率<=max_err 时，不把权重降到低于上一轮（修 rank 在 score/top < mid_ratio 时直接给 low_w=0，把 #2/#23 这类大样本干净渠道打成 0/降档）。protect=false 关闭。",
+    "protect": false,
+    "min_n": 200,
+    "max_err": 0.02,
+    "_comment_v466": "v4.66：保护逻辑并入 soft_down，这里只留 MAINZERO 诊断阈值"
+  },
+  "settle": {
+    "_comment": "v4.98 定档（替代 v4.66 soft_down 和 error_alert 清零；Groove 11-12 16:01「你都不听系统建议」）：证据=1h 真实请求，去掉客户端 4xx 和跨渠道同令牌 do request failed，单个令牌占非容量错误>=tok_share 且其他令牌在该渠道仍成功时，该令牌错误最多计 tok_cap 条（429/超时总计入）；降权必须有渠道错误（1h 真实>=min_real_n、去集中错误>=down_min_err 且率>=down_err），延迟/长输出/小样本不单独降；加权要求 1h 真实>=min_real_n 且去集中错误率<up_max_err；每轮 ±step、不低于 floor（低于 floor 可回到 floor 防饿死）；极端（真实>=extreme_min_n 且去集中错误率>=extreme_err，或全部请求>=90% 失败）直接降到 w_min；上限（软上限/信任/新渠道）总是优先",
+    "enabled": true,
+    "step": 2,
+    "floor": 2,
+    "min_real_n": 30,
+    "tok_cap": 2,
+    "tok_share": 0.8,
+    "down_err": 0.03,
+    "down_min_err": 3,
+    "up_max_err": 0.02,
+    "extreme_err": 0.2,
+    "extreme_min_n": 20,
+    "cut_needs_fault": true,
+    "raise_clean": false,
+    "_comment_v500": "v5.00：cut_needs_fault=true（GPT 回测 6/12/24/48h 一致率均提升）——任何降权或系统上限（信任/新渠道/小样本/容量）都需要真实故障证据（1h 真实≥30、去集中错误≥3 且≥3%），极端清零同样需要；操作员 soft_caps 仍优先。raise_clean（干净即 +2）回测 GPT/Claude 均无净提升，保持关闭"
+  },
+  "pair_slow": {
+    "_comment": "v5.01（Groove 11-19 10:00「明显偏慢的渠道不该保持高权重」）：同令牌配对耗时比。同一令牌、同一模型、同一输出长度档（<150/<400/<900/≥900）里，本渠道与其他渠道各≥min_cell 条成功，比较每千输出 token 耗时（ct 下限 ct_floor）的中位数，按样本加权几何平均。先看 1h（minutes），配对令牌≥min_tokens 且本渠道配对条数≥min_rows 才用；否则看 24h（ref_minutes）。比≥ratio：每轮降 step、下限 floor（不建议停用）；recover≤比<ratio：不加；比<recover：按常规规则回升。soft_caps 仍优先。",
+    "enabled": true,
+    "minutes": 60,
+    "ref_minutes": 1440,
+    "min_cell": 3,
+    "ct_floor": 100,
+    "min_tokens": 3,
+    "min_rows": 30,
+    "ratio": 1.6,
+    "recover": 1.3,
+    "step": 2,
+    "floor": 10
+  },
+  "exclude_ids": [],
+  "_comment_exclude_ids": "v4.66：Groove 11-03 21:11 下线 #28（权重已写 0，下线由主站执行）；排除渠道不参与打分/写库，库里已删除也不报错"
 }

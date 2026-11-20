@@ -1,0 +1,196 @@
+{
+  "now": 1793150394,
+  "trust_source": "shadow 09:15 +4.9m",
+  "trust": {
+    "2": 0.5767,
+    "20": 0.907,
+    "21": 0.1574,
+    "22": 1,
+    "23": 1,
+    "26": 0.3695,
+    "5": 1
+  },
+  "newcomers": [
+    21
+  ],
+  "order": [
+    21,
+    22,
+    20,
+    26,
+    5,
+    2,
+    23
+  ],
+  "target": {
+    "2": 5,
+    "20": 10,
+    "21": 2,
+    "22": 10,
+    "23": 8,
+    "26": 2,
+    "5": 6
+  },
+  "scores": {
+    "2": 0.2765,
+    "20": 0.3705,
+    "21": 0.4486,
+    "22": 0.4198,
+    "23": 0.2064,
+    "26": 0.3394,
+    "5": 0.3375
+  },
+  "notes": [
+    "#21 软上限 3（信任 0.16 \u003c 0.3且 1h 样本 17 \u003c 20，恢复期限幅），目标 12.0 被截断，已标记质量风险",
+    "#2 定档：策略 0→5（无渠道级错误证据（1h 真实 12、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#5 定档：策略 3→6（无渠道级错误证据（1h 真实 103、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#21 定档：策略 3→2（1h 真实 9（门槛 30）、去集中错误率 0.0%，不加）",
+    "#22 定档：策略 12→10（每轮最多加 2）",
+    "#23 定档：策略 0→8（无渠道级错误证据（1h 真实 34、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#26 定档：策略 3→2（低于下限 2 时只回到 2（防饿死））"
+  ],
+  "access_denied": [],
+  "ad_streak": {},
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 7,
+    "passes": {},
+    "streaks": {},
+    "bottom": [
+      23,
+      2,
+      5
+    ],
+    "dormant": [],
+    "base_skipped": [
+      21,
+      26
+    ],
+    "base_lax": {
+      "21": "buffered",
+      "26": "buffered"
+    },
+    "base": {
+      "total": 4,
+      "ttft": 1.84
+    },
+    "base_up": null,
+    "bup_ids": [],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "21": {
+        "disable": false,
+        "dormant_streak": 1,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 52.8,
+        "last_streak": 2,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "26": {
+        "disable": false,
+        "dormant_streak": 1,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

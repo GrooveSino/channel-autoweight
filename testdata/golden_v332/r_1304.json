@@ -1,0 +1,181 @@
+{
+  "now": 1793423071,
+  "trust_source": "shadow 12:55 +9.5m",
+  "trust": {
+    "2": 0.4184,
+    "20": 1,
+    "21": 1,
+    "22": 1,
+    "23": 1,
+    "5": 1
+  },
+  "newcomers": [],
+  "order": [
+    22,
+    23,
+    21,
+    5,
+    20,
+    2
+  ],
+  "target": {
+    "2": 7,
+    "20": 10,
+    "21": 4,
+    "22": 6,
+    "23": 2,
+    "5": 3
+  },
+  "scores": {
+    "2": 0.1244,
+    "20": 0.4031,
+    "21": 0.5251,
+    "22": 0.7069,
+    "23": 0.6232,
+    "5": 0.429
+  },
+  "notes": [
+    "#2 定档：策略 0→7（无渠道级错误证据（1h 真实 70、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#5 定档：策略 0→3（无渠道级错误证据（1h 真实 448、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#20 定档：策略 0→10（无渠道级错误证据（1h 真实 96、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#21 定档：策略 3→4（无渠道级错误证据（1h 真实 22、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#22 定档：策略 12→6（1h 真实 12（门槛 30）、去集中错误率 0.0%，不加）",
+    "#23 定档：策略 10→2（低于下限 2 时只回到 2（防饿死））"
+  ],
+  "access_denied": [],
+  "ad_streak": {},
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 6,
+    "passes": {
+      "26": false
+    },
+    "streaks": {
+      "26": 0
+    },
+    "bottom": [
+      2,
+      20
+    ],
+    "dormant": [],
+    "base_skipped": [
+      23
+    ],
+    "base_lax": {
+      "23": "dormant"
+    },
+    "base": {
+      "total": 8.58,
+      "ttft": 4.08
+    },
+    "base_up": {
+      "n": 2,
+      "total": 6.44,
+      "ttft": 1.53
+    },
+    "bup_ids": [
+      2,
+      20
+    ],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 1,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "21": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

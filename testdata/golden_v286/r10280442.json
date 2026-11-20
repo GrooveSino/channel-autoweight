@@ -1,0 +1,200 @@
+{
+  "now": 1793133735,
+  "trust_source": "shadow 04:40 +2.2m",
+  "trust": {
+    "2": 0.5461,
+    "20": 0.5246,
+    "21": 0.2971,
+    "22": 1,
+    "23": 0.7016,
+    "26": 0.1058,
+    "5": 1
+  },
+  "newcomers": [
+    21
+  ],
+  "order": [
+    5,
+    22,
+    20,
+    26,
+    21,
+    2,
+    23
+  ],
+  "target": {
+    "2": 3,
+    "20": 8,
+    "21": 3,
+    "22": 12,
+    "23": 4,
+    "26": 2,
+    "5": 6
+  },
+  "scores": {
+    "2": 0.3276,
+    "20": 0.3749,
+    "21": 0.3404,
+    "22": 0.4797,
+    "23": 0.2423,
+    "26": 0.3415,
+    "5": 0.548
+  },
+  "notes": [
+    "#5 软上限 6（ECO 高并发下曾推理过少/空回复），目标 12.0 被截断，已标记质量风险",
+    "#2 定档：策略 0→3（无渠道级错误证据（1h 真实 31、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#20 定档：策略 3→8（无渠道级错误证据（1h 真实 5、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#23 定档：策略 0→4（无渠道级错误证据（1h 真实 79、渠道错误 0、去集中 0），延迟/小样本不单独降权）",
+    "#26 定档：策略 3→2（1h 真实 5（门槛 30）、去集中错误率 0.0%，不加）"
+  ],
+  "access_denied": [],
+  "ad_streak": {},
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 7,
+    "passes": {},
+    "streaks": {},
+    "bottom": [
+      23,
+      22,
+      5
+    ],
+    "dormant": [
+      26
+    ],
+    "base_skipped": [
+      2,
+      20,
+      21,
+      26
+    ],
+    "base_lax": {
+      "2": "buffered",
+      "20": "buffered",
+      "21": "buffered",
+      "26": "buffered"
+    },
+    "base": {
+      "total": 3,
+      "ttft": 1.83
+    },
+    "base_up": null,
+    "bup_ids": [],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "21": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 34.9,
+        "last_streak": 2,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "26": {
+        "disable": false,
+        "dormant_streak": 9,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

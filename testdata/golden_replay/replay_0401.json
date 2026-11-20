@@ -1,0 +1,183 @@
+{
+  "now": 1793304112,
+  "trust_source": "shadow 03:55 +6.9m",
+  "trust": {
+    "2": 0.5325,
+    "20": 1,
+    "22": 1,
+    "23": 1,
+    "26": 0.1,
+    "5": 1
+  },
+  "newcomers": [],
+  "order": [
+    5,
+    20,
+    22,
+    2,
+    23,
+    26
+  ],
+  "target": {
+    "2": 2,
+    "20": 6,
+    "22": 8,
+    "23": 8,
+    "26": 0,
+    "5": 6
+  },
+  "scores": {
+    "2": 0.4131,
+    "20": 0.5745,
+    "22": 0.5686,
+    "23": 0.3094,
+    "26": 0,
+    "5": 0.7843
+  },
+  "notes": [
+    "#5 软上限 6（ECO 高并发下曾推理过少/空回复），目标 12.0 被截断，已标记质量风险",
+    "#2 定档：策略 3→2（低于下限 2 时只回到 2（防饿死））",
+    "#20 定档：策略 12→6（1h 真实 5（门槛 30）、去集中错误率 0.0%，不加）",
+    "#22 定档：策略 10→8（1h 真实 6（门槛 30）、去集中错误率 0.0%，不加）",
+    "#23 定档：策略 0→8（无渠道级错误证据（1h 真实 82、渠道错误 0、去集中 0），延迟/小样本不单独降权）"
+  ],
+  "access_denied": [],
+  "ad_streak": {},
+  "toggle": {
+    "actions": [],
+    "notify": false,
+    "n_enabled_after": 6,
+    "passes": {
+      "21": false
+    },
+    "streaks": {
+      "21": 0
+    },
+    "bottom": [
+      23,
+      22
+    ],
+    "dormant": [],
+    "base_skipped": [
+      2,
+      26
+    ],
+    "base_lax": {
+      "2": "buffered"
+    },
+    "base": {
+      "total": 8.52,
+      "ttft": 3.63
+    },
+    "base_up": {
+      "n": 2,
+      "total": 3.05,
+      "ttft": 2.08
+    },
+    "bup_ids": [
+      22,
+      23
+    ],
+    "enabled": {
+      "2": {
+        "disable": false,
+        "dormant_streak": 1,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "20": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "22": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "23": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      },
+      "26": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 1,
+          "probe_driven": false,
+          "probe_only": 1,
+          "streak": 2
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 2,
+        "up_unusable_streak": 0,
+        "why": [
+          "日志/探测口径持续报错 2 轮，但真实用户 1h 错误率未超标（v2.88 只算真实用户），不计入禁用"
+        ]
+      },
+      "5": {
+        "disable": false,
+        "dormant_streak": 0,
+        "err_streak": 0,
+        "err_streak_src": {
+          "by_err": 0,
+          "probe_driven": false,
+          "probe_only": 0,
+          "streak": 0
+        },
+        "last_span_min": 0,
+        "last_streak": 0,
+        "unusable_streak": 0,
+        "up_unusable_streak": 0,
+        "why": []
+      }
+    }
+  },
+  "toggle_note": null
+}

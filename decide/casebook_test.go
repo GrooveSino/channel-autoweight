@@ -3,6 +3,7 @@ package decide
 import (
 	"autoweight/features"
 	m "autoweight/model"
+	"strings"
 	"testing"
 )
 
@@ -50,4 +51,55 @@ func TestCasebookConcentrationThroughSettle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// CASE-AW-015: sanitized aggregate shape from 2026-11-21 02:21 +08:00 CC #72.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks in existing v5.01 settle semantics; it does not change the algorithm.
+func TestCasebookTrustCapHeldWithoutFault(t *testing.T) {
+	// Rate uses the discounted denominator Eff/(N-Err+Eff)=2/11≈.1818 (reported 18.2%).
+	rate := 2.0 / 11.0
+	feat := &m.Feat{
+		Long: &m.Window{N: 11, ErrRate: m.F(rate)},
+		Chan: &m.ChanStat{N: 11, Err: 2, Eff: 2, Rate: rate},
+	}
+	cap := &Cap{Cap: 3, Reason: "信任 0.28 < 0.3且 1h 样本 15 < 20，恢复期限幅", Kind: "trust"}
+
+	t.Run("cc_cut_needs_fault_holds_20", func(t *testing.T) {
+		next := map[int]int{72: 0}
+		var notes []string
+		cfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+		Settle(cfg, next, map[int]int{72: 20}, m.Feats{72: feat}, []int{72}, map[int]*Cap{72: cap}, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"系统上限", "不执行", "18.2"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected held-cap note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("gpt_without_flag_applies_trust_cap", func(t *testing.T) {
+		next := map[int]int{72: 0}
+		Settle(m.M{"settle": m.M{"raise_clean": false}}, next, map[int]int{72: 20}, m.Feats{72: feat}, []int{72}, map[int]*Cap{72: cap}, nil)
+		if next[72] != 3 {
+			t.Fatalf("weight=%d want 3", next[72])
+		}
+	})
+
+	t.Run("fault_threshold_allows_system_cap", func(t *testing.T) {
+		// Same 3/30 rate shape that meets N≥30, Eff≥3, Rate≥.03.
+		fault := &m.Feat{
+			Long: &m.Window{N: 30, ErrRate: m.F(0.1)},
+			Chan: &m.ChanStat{N: 30, Err: 3, Eff: 3, Rate: 0.1},
+		}
+		next := map[int]int{72: 0}
+		cfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+		Settle(cfg, next, map[int]int{72: 20}, m.Feats{72: fault}, []int{72}, map[int]*Cap{72: cap}, nil)
+		if next[72] != 3 {
+			t.Fatalf("weight=%d want 3 once the 30/3/3%% gate is met", next[72])
+		}
+	})
 }

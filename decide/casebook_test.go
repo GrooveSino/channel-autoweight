@@ -789,3 +789,133 @@ func TestCasebookTrustRecoversOnProbeThinQuietWindow(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-022: sanitized aggregate shape from 2026-11-21 07:34 +08:00 CC #67.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 trust+settle semantics; it does not change the algorithm.
+func TestCasebookThinWindowErrorCrashesTrustButSettleHolds(t *testing.T) {
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08). down, err_full
+	// and err_1h_thr match Defaults / the live file so the 1.0→0.4 arithmetic
+	// does not silently depend on a different default.
+	cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Scoring window 2/6=33.33% (includes probes). Mix real errors 2/4=50%.
+	// ChanStat after excluding one client-class error: N=3, Err=1, Eff=1, Rate=1/3.
+	live := func() m.Feats {
+		return m.Feats{
+			67: {
+				Long:  &m.Window{N: 6, Err: 2, ErrRate: m.F(2.0 / 6.0)},
+				Short: &m.Window{N: 2, Err: 2, ErrRate: m.F(1.0)},
+				Mix:   &m.Mix{NUser: 4, NProbe: 2, NErrReal: 2, ErrRateReal: m.F(0.5)},
+				Chan:  &m.ChanStat{N: 3, Err: 1, Client: 1, Eff: 1, Rate: 1.0 / 3.0},
+			},
+		}
+	}
+
+	t.Run("live_shape_trust_drops_1_to_0_4", func(t *testing.T) {
+		st := trust.Step(cfg, []int{67}, live(), nil, map[int]float64{67: 1.0}, nil)[67]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// Both parts saturate independently at 1.0; maxSev keeps 1.0 (not additive).
+		// Update: 1.0 * (1 - 0.6*1.0) = 0.4.
+		if st.Sev != 1 || st.Trust != 0.4 {
+			t.Fatalf("trust sev=%v value=%v want 1 / 0.4", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "10m 错误 2/2") || !strings.Contains(joined, "1h 错误率 33.3%") {
+			t.Fatalf("expected both raw-window notes, got %q", st.Why)
+		}
+	})
+
+	t.Run("ten_minute_all_error_alone_saturates", func(t *testing.T) {
+		fs := live()
+		fs[67].Long = &m.Window{N: 6, Err: 0, ErrRate: m.F(0)}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 1.0}, nil)[67]
+		if st.Sev != 1 || st.Trust != 0.4 {
+			t.Fatalf("10m 2/2 alone must saturate, sev=%v value=%v", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "10m 错误 2/2") || strings.Contains(joined, "1h 错误率") {
+			t.Fatalf("expected only the 10m note, got %q", st.Why)
+		}
+	})
+
+	t.Run("one_hour_raw_rate_alone_saturates", func(t *testing.T) {
+		fs := live()
+		fs[67].Short = &m.Window{N: 0, Err: 0}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 1.0}, nil)[67]
+		if st.Sev != 1 || st.Trust != 0.4 {
+			t.Fatalf("1h 33.3%% alone must saturate, sev=%v value=%v", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "1h 错误率 33.3%") || strings.Contains(joined, "10m 错误") {
+			t.Fatalf("expected only the 1h note, got %q", st.Why)
+		}
+	})
+
+	t.Run("trust_reads_raw_window_not_chan_or_mix", func(t *testing.T) {
+		fs := live()
+		// Same ChanStat 1/3 and Mix 2/4, but a clean scoring window must not
+		// inherit those rates. This is the CASE-AW-017 interaction on this shape.
+		fs[67].Long = &m.Window{N: 6, Err: 0, ErrRate: m.F(0)}
+		fs[67].Short = &m.Window{N: 2, Err: 0, ErrRate: m.F(0)}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 1.0}, nil)[67]
+		if st.Sev != 0 || st.Trust != 1 {
+			t.Fatalf("clean scoring window must not read Chan/Mix rates, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("chanstats_excludes_one_client_from_thin_window", func(t *testing.T) {
+		// Two successes, one channel error, one client-class 400.
+		// Fictional token numbers only; no production identifiers.
+		rows := []m.Row{
+			{Ch: 67, T: 100, Type: 2, Tok: 900003},
+			{Ch: 67, T: 100, Type: 2, Tok: 900004},
+			{Ch: 67, T: 100, Type: 5, Tok: 900005},
+			{Ch: 67, T: 100, Type: 5, Tok: 900006, Sc: m.I(400)},
+		}
+		stats := features.ChanStats(m.M{}, rows, 0, 2, .8)[67]
+		if stats.N != 3 || stats.Err != 1 || stats.Client != 1 || stats.Eff != 1 || stats.Rate != 0.3333 {
+			t.Fatalf("unexpected channel evidence: %+v", stats)
+		}
+	})
+
+	t.Run("settle_holds_20_when_n3_eff1", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{67: 0}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[67], notes)
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"定档：策略 0→20", "无渠道级错误证据", "1h 真实 3", "渠道错误 1", "去集中 1", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+
+	t.Run("meeting_the_gate_allows_a_cut", func(t *testing.T) {
+		// Meet 30/3/3% but stay below the extreme path (Rate>=20% and N>=20
+		// would go straight to 0 and emit no 定档 note when strategy is already 0).
+		fault := m.Feats{67: {
+			Long: &m.Window{N: 30, Err: 3, ErrRate: m.F(0.1)},
+			Chan: &m.ChanStat{N: 30, Err: 3, Eff: 3, Rate: 0.1},
+		}}
+		next := map[int]int{67: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fault, []int{67}, nil, &notes)
+		if next[67] != 18 {
+			t.Fatalf("weight=%d want 18 after meeting 30/3/3%%; notes=%q", next[67], notes)
+		}
+		if !strings.Contains(strings.Join(notes, ";"), "达降权门槛") {
+			t.Fatalf("expected a fault-cut note, got %q", notes)
+		}
+	})
+}

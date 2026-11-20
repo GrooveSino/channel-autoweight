@@ -590,3 +590,104 @@ func TestCasebookSlowBurstPenaltyDoesNotCut(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-020: sanitized aggregate shape from 2026-11-21 06:05 +08:00 CC #68.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: trust's 1h slow-rate penalty reads the
+// scoring window (N and SlowRate), including a probe-thin window with no
+// real user traffic. ChanStat / mix_60m n_user are not consulted. Settle
+// still holds the weight when there is no channel-level fault evidence.
+// It does not change the algorithm.
+func TestCasebookTrustSlowRateOnProbeThinWindow(t *testing.T) {
+	cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+	zeroGap := m.F(0)
+	live := func() m.Feats {
+		return m.Feats{
+			68: {
+				Long:  &m.Window{N: 5, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0.2), P50: m.F(3), P90: m.F(110)},
+				Short: &m.Window{N: 1, Err: 0, ErrRate: m.F(0)},
+				Mix:   &m.Mix{NUser: 0, NProbe: 5},
+			},
+		}
+	}
+
+	t.Run("live_shape_penalizes_trust_on_probe_thin_window", func(t *testing.T) {
+		fs := live()
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.4614}, nil)[68]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0.3 || st.Trust != 0.3783 {
+			t.Fatalf("trust sev=%v value=%v want 0.3 / 0.3783", st.Sev, st.Trust)
+		}
+		if !strings.Contains(strings.Join(st.Why, ";"), "1h 慢请求 20%") {
+			t.Fatalf("expected slow-rate trust note, got %q", st.Why)
+		}
+	})
+
+	t.Run("chanstat_zero_does_not_block_penalty", func(t *testing.T) {
+		fs := live()
+		fs[68].Chan = &m.ChanStat{N: 0, Err: 0, Eff: 0, Rate: 0}
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.4614}, nil)[68]
+		if st.Sev != 0.3 || st.Trust != 0.3783 {
+			t.Fatalf("trust still reads the scoring window, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("no_penalty_when_n_below_slow_min", func(t *testing.T) {
+		fs := live()
+		fs[68].Long.N = 4
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.4614}, zeroGap)[68]
+		if st.Sev != 0 || st.Trust != 0.4614 {
+			t.Fatalf("n=4 must not apply slow penalty, sev=%v value=%v", st.Sev, st.Trust)
+		}
+		if strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("did not expect slow-rate note, got %q", st.Why)
+		}
+	})
+
+	t.Run("no_penalty_at_or_below_slow_threshold", func(t *testing.T) {
+		fs := live()
+		fs[68].Long.SlowRate = m.F(0.15)
+		st := trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.4614}, zeroGap)[68]
+		if st.Sev != 0 || st.Trust != 0.4614 {
+			t.Fatalf("slow_rate=0.15 must not penalize, sev=%v value=%v", st.Sev, st.Trust)
+		}
+		fs = live()
+		fs[68].Long.SlowRate = m.F(0.14)
+		st = trust.Step(cfg, []int{68}, fs, nil, map[int]float64{68: 0.4614}, zeroGap)[68]
+		if st.Sev != 0 || st.Trust != 0.4614 {
+			t.Fatalf("slow_rate=0.14 must not penalize, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("busy_clean_channel_below_threshold_does_not_penalize", func(t *testing.T) {
+		fs := m.Feats{
+			67: {
+				Long: &m.Window{N: 236, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0.0508)},
+				Chan: &m.ChanStat{N: 232, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+		}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 1}, zeroGap)[67]
+		if st.Sev != 0 || st.Trust != 1 {
+			t.Fatalf("#67 slow_rate 5.08%% must not penalize, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("settle_holds_at_20_with_zero_real_traffic", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{68: 0}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{68: 20}, fs, []int{68}, nil, &notes)
+		if next[68] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[68], notes)
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "无渠道级错误证据") || !strings.Contains(joined, "1h 真实 0") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") || !strings.Contains(joined, "延迟/小样本不单独降权") {
+			t.Fatalf("expected settle hold note, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+}

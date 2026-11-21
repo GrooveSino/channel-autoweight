@@ -3126,3 +3126,119 @@ func TestCasebookSampleLimitedFloorRecoveryComputesTrustCapButSettleHolds(t *tes
 		}
 	})
 }
+
+// CASE-AW-039: sanitized aggregate shape from 2026-11-21 22:30 +08:00 GPT #2.
+// No production log rows, request identifiers, model names or real token IDs.
+// After a modest 10m-path trust cut (CASE-AW-028 addendum in the previous
+// counted round), a later window with a clean 10m and a 1h raw rate still
+// below 2% fully restores trust to 1, even though the inter-round gap is
+// under 45 minutes, because ample n60 makes the increment larger than the
+// remaining gap. This locks current v5.01 Update/Settle behavior; it does
+// not change the algorithm.
+func TestCasebookAmpleCleanWindowFullyRecoversModestTenMinTrustCut(t *testing.T) {
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2379s.
+	gap := m.F(2379.0 / 60.0)
+	// Live #2 shape this round: 10m 0/11, 1h raw 3/251=1.20% (below 2%),
+	// n60=251 already at up_full_n. Prev trust 0.88 after the previous
+	// 10m 3/75 cut.
+	live := m.Feats{2: {
+		Long:  &m.Window{N: 251, Err: 3, ErrRate: m.F(0.012)},
+		Short: &m.Window{N: 11, Err: 0, ErrRate: m.F(0)},
+		Chan:  &m.ChanStat{N: 246, Err: 2, Client: 1, Eff: 2, Rate: 0.0081},
+	}}
+
+	t.Run("live_shape_recovers_0_88_to_1_despite_sub_45m_gap", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{2}, live, nil, map[int]float64{2: 0.88}, gap)[2]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=0 because 1h 1.20% is not > 2% and 10m is clean (0/11, n>=2).
+		// 0.88 + 0.2*min(1, 2379/60/45)*min(1, 251/30) = 1.0562... -> 1.0
+		// The remaining gap to 1 is 0.12, smaller than the 0.1762 increment.
+		if st.Sev != 0 || st.Trust != 1 {
+			t.Fatalf("trust sev=%v value=%v want 0 / 1", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 0 {
+			t.Fatalf("trust why=%v want no notes on a clean recovery", st.Why)
+		}
+	})
+
+	t.Run("siblings_32_and_73_also_fill_to_1", func(t *testing.T) {
+		// Same 2379s gap. Live #32 prev 0.9472, 10m 0/27, 1h 1/230=0.43%.
+		// Live #73 prev 0.9538, 10m 0/83, 1h 2/556=0.36%. Both already
+		// closer to 1 than #2, so they also cap at 1.
+		sibs := m.Feats{
+			32: {Long: &m.Window{N: 230, Err: 1, ErrRate: m.F(0.0043)}, Short: &m.Window{N: 27, Err: 0, ErrRate: m.F(0)}},
+			73: {Long: &m.Window{N: 556, Err: 2, ErrRate: m.F(0.0036)}, Short: &m.Window{N: 83, Err: 0, ErrRate: m.F(0)}},
+		}
+		st32 := trust.Step(trustCfg, []int{32}, sibs, nil, map[int]float64{32: 0.9472}, gap)[32]
+		st73 := trust.Step(trustCfg, []int{73}, sibs, nil, map[int]float64{73: 0.9538}, gap)[73]
+		if st32.Sev != 0 || st32.Trust != 1 {
+			t.Fatalf("#32 sev=%v value=%v want 0 / 1", st32.Sev, st32.Trust)
+		}
+		if st73.Sev != 0 || st73.Trust != 1 {
+			t.Fatalf("#73 sev=%v value=%v want 0 / 1", st73.Sev, st73.Trust)
+		}
+	})
+
+	t.Run("thin_n60_would_not_reach_1", func(t *testing.T) {
+		// Same prev, gap and clean 10m, but n60=6 like a thin CC window.
+		// 0.88 + 0.2*min(1, 2379/60/45)*min(1, 6/30) = 0.9152
+		thin := m.Feats{2: {
+			Long:  &m.Window{N: 6, Err: 0, ErrRate: m.F(0)},
+			Short: &m.Window{N: 11, Err: 0, ErrRate: m.F(0)},
+		}}
+		st := trust.Step(trustCfg, []int{2}, thin, nil, map[int]float64{2: 0.88}, gap)[2]
+		if st.Sev != 0 || st.Trust != 0.9152 {
+			t.Fatalf("thin n60 must not fill to 1, sev=%v value=%v want 0 / 0.9152", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("ten_minute_gap_would_not_reach_1", func(t *testing.T) {
+		// Ample n60, but a 10-minute gap: 0.88 + 0.2*(10/45)*1 = 0.9244
+		short := m.F(10.0)
+		st := trust.Step(trustCfg, []int{2}, live, nil, map[int]float64{2: 0.88}, short)[2]
+		if st.Sev != 0 || st.Trust != 0.9244 {
+			t.Fatalf("short gap must not fill to 1, sev=%v value=%v want 0 / 0.9244", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("settle_holds_16_to_20_even_with_eff_2", func(t *testing.T) {
+		// Live #2 ChanStat N=246, Err=2, Client=1, Eff=2, Rate=0.81%.
+		// N and Eff are short of the 30/3/3% conjunction (Err=2<3 and
+		// Rate=0.81%<3%). Strategy 16 is pulled back to 20, and the
+		// hold note still says 无渠道级错误证据.
+		fs := m.Feats{2: {
+			Long:  &m.Window{N: 251, Err: 3, ErrRate: m.F(0.012)},
+			Short: &m.Window{N: 11, Err: 0, ErrRate: m.F(0)},
+			Chan:  &m.ChanStat{N: 246, Err: 2, Client: 1, Eff: 2, Rate: 0.0081},
+		}}
+		next := map[int]int{2: 16}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20; Eff=2 must not satisfy the fault gate", next[2])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#2 定档：策略 16→20", "无渠道级错误证据", "1h 真实 246", "渠道错误 2", "去集中 2", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("already_20_has_no_settle_note", func(t *testing.T) {
+		next := map[int]int{2: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{2: 20}, live, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[2], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("already at 20 should not emit a settle note, got %q", notes)
+		}
+	})
+}

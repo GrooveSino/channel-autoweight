@@ -1468,6 +1468,9 @@ func TestCasebookThinWindowClientErrorCutsTrustButSettleHolds(t *testing.T) {
 // A single 10m error in a non-tiny window (N>=err_10m_min_n=2) cuts trust with
 // no 2% rate threshold, even when the 1h raw rate stays <=2% and ChanStat has
 // 0 channel errors. Weight still holds because 30/3/3% is not met.
+// A later addendum (2026-11-21 13:30 +08:00) locks the same rule for two 10m
+// errors (2/57 and 2/51). The original "single error" wording does not itself
+// cover two errors; the threshold-free 10m path still applies.
 func TestCasebookNonTinyTenMinSingleErrorCutsTrustButSettleHolds(t *testing.T) {
 	now := int64(100000)
 	build := func(shortSuccess, shortErr int, longSuccess, longErr, probes int, status *int) m.Feats {
@@ -1612,6 +1615,282 @@ func TestCasebookNonTinyTenMinSingleErrorCutsTrustButSettleHolds(t *testing.T) {
 		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: prev}, nil)[2]
 		if st.Sev != 0 || st.Trust != 1 || len(st.Why) != 0 {
 			t.Fatalf("trust sev=%v value=%v why=%v want 0 / 1 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+
+	t.Run("ten_min_2_of_57_same_rule", func(t *testing.T) {
+		// Later-round GPT #23 shape: 10m 2/57, 60m 3/364, mix 360 user + 4
+		// probes, ChanStat N=357 Client=3 Err=0. 1h raw 3/364=0.82% is below
+		// 2%. The original "single error" wording does not itself cover two
+		// 10m errors; the same no-2%-threshold path still cuts trust.
+		fs := build(55, 2, 302, 1, 4, m.I(400))
+		f := fs[2]
+		if f.Short.N != 57 || f.Short.Err != 2 || f.Long.N != 364 || f.Long.Err != 3 {
+			t.Fatalf("windows short=%+v long=%+v want 57/2 and 364/3", f.Short, f.Long)
+		}
+		if m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h err rate=%v should stay at or under 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		if f.Chan.N != 357 || f.Chan.Err != 0 || f.Chan.Client != 3 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=357 Err=0 Client=3 Eff=0 Rate=0", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: 1}, nil)[2]
+		if st.Sev != 0.175 || st.Trust != 0.895 || len(st.Why) != 1 || st.Why[0] != "10m 错误 2/57" {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0.175 / 0.895 / [10m 错误 2/57]", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{2: 3}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20 after 3\u219220 hold", next[2])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 357") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") {
+			t.Fatalf("expected hold note with ChanStat 357/0/0, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+
+	t.Run("ten_min_2_of_51_same_rule", func(t *testing.T) {
+		// Later-round GPT #73 shape: 10m 2/51, 60m 4/304, mix 300 user + 4
+		// probes, ChanStat N=296 Client=4 Err=0. 1h raw 4/304=1.32% is below
+		// 2%. prev=0.9664 yields 0.8528 at sev=0.196.
+		fs := build(49, 2, 247, 2, 4, m.I(400))
+		f := fs[2]
+		if f.Short.N != 51 || f.Short.Err != 2 || f.Long.N != 304 || f.Long.Err != 4 {
+			t.Fatalf("windows short=%+v long=%+v want 51/2 and 304/4", f.Short, f.Long)
+		}
+		if m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h err rate=%v should stay at or under 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		if f.Chan.N != 296 || f.Chan.Err != 0 || f.Chan.Client != 4 || f.Chan.Eff != 0 {
+			t.Fatalf("chanstat=%+v want N=296 Err=0 Client=4 Eff=0", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: 0.9664}, nil)[2]
+		if st.Sev != 0.196 || st.Trust != 0.8528 || len(st.Why) != 1 || st.Why[0] != "10m 错误 2/51" {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0.196 / 0.8528 / [10m 错误 2/51]", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{2: 0}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20 after 0\u219220 hold", next[2])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 296") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") {
+			t.Fatalf("expected hold note with ChanStat 296/0/0, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+}
+
+// CASE-AW-029: sanitized aggregate shape from 2026-11-21 13:30 +08:00 CC #72/#68/#67.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: an ample 1h scoring window with slow_rate about
+// 22% applies the fixed slow-trust penalty (sev=0.3), while ChanStat has 0
+// channel errors and Settle holds 20 because 30/3/3% is not met. HANGTAIL is
+// diagnostic-only (see TestHangTailFlagsAmpleSlowWindowStillRecordsOnly).
+// Distinct from CASE-AW-019 (10m SlowBurst multiplies the score only),
+// CASE-AW-020 (1h slow-rate trust cut with zero real users) and CASE-AW-024
+// (same trust path on thin but non-zero real traffic). This is not a fault
+// gate, not CASE-AW-025 (all ineligible) and not CASE-AW-016 (promotion
+// because the leader is ineligible). Live raw scores already had the thinner
+// eligible peer ahead; the trust multiplier (floor 0.85) only trims further.
+// It does not change the algorithm.
+func TestCasebookAmpleSlowRateCutsTrustButSettleHolds(t *testing.T) {
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08). down,
+	// slow threshold and recovery knobs match Defaults / the example file so
+	// the 0.9797->0.8034 arithmetic does not silently depend on a different
+	// default. floor=0.85 is the live multiplier floor used in the rank test.
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+		"slow_thr": 0.15, "slow_sev": 0.3, "floor": 0.85,
+	}}
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	// Inter-round gap is the difference of CC algorithm now values: 2440s.
+	gap := m.F(2440.0 / 60.0)
+	live72 := func() m.Feats {
+		return m.Feats{
+			72: {
+				Long:  &m.Window{N: 127, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0.2205), P50: m.F(15), P90: m.F(120)},
+				Short: &m.Window{N: 29, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0.3448), P50: m.F(30), P90: m.F(191)},
+				Mix:   &m.Mix{NUser: 123, NProbe: 4, NErrReal: 0, ErrRateReal: m.F(0)},
+				Chan:  &m.ChanStat{N: 123, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+		}
+	}
+
+	t.Run("live_shape_penalizes_trust_0_9797_to_0_8034", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{72}, live72(), nil, map[int]float64{72: 0.9797}, gap)[72]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// N=127>=slow_min_n and SlowRate=22.05%>15% => fixed sev=0.3.
+		// Update takes the down branch: 0.9797*(1-0.6*0.3)=0.803354 -> 0.8034.
+		// "%.0f" of 22.05 is 22, so the note is "1h 慢请求 22%".
+		if st.Sev != 0.3 || st.Trust != 0.8034 {
+			t.Fatalf("trust sev=%v value=%v want 0.3 / 0.8034", st.Sev, st.Trust)
+		}
+		if !strings.Contains(strings.Join(st.Why, ";"), "1h 慢请求 22%") {
+			t.Fatalf("expected slow-rate trust note, got %q", st.Why)
+		}
+	})
+
+	t.Run("ample_clean_chanstat_does_not_block_penalty", func(t *testing.T) {
+		fs := live72()
+		fs[72].Chan = &m.ChanStat{N: 123, Err: 0, Client: 0, Eff: 0, Rate: 0}
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.9797}, gap)[72]
+		if st.Sev != 0.3 || st.Trust != 0.8034 {
+			t.Fatalf("trust still reads the scoring window, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("ten_min_slow_alone_does_not_drive_trust", func(t *testing.T) {
+		// Contrast with CASE-AW-019: 10m slow_rate is not a trust input.
+		fs := live72()
+		fs[72].Long.SlowRate = m.F(0.15)
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.9797}, gap)[72]
+		if st.Sev != 0 || strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("1h slow_rate=15%% must not penalize even if 10m is 34.48%%, sev=%v why=%v", st.Sev, st.Why)
+		}
+	})
+
+	t.Run("at_or_below_slow_threshold_does_not_penalize", func(t *testing.T) {
+		for _, rate := range []float64{0.15, 0.14} {
+			fs := live72()
+			fs[72].Long.SlowRate = m.F(rate)
+			st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.9797}, gap)[72]
+			if st.Sev != 0 || strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+				t.Fatalf("slow_rate=%v must not penalize, sev=%v why=%v", rate, st.Sev, st.Why)
+			}
+		}
+	})
+
+	t.Run("settle_holds_20_from_strategy_0", func(t *testing.T) {
+		fs := live72()
+		next := map[int]int{72: 0}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[72], notes)
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"定档：策略 0→20", "无渠道级错误证据", "1h 真实 123", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+
+	t.Run("strategy_already_20_has_no_settle_note", func(t *testing.T) {
+		fs := live72()
+		next := map[int]int{72: 20}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[72], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("strategy already 20 should not emit a settle note, got %q", notes)
+		}
+	})
+
+	t.Run("thinner_eligible_peer_leads_and_both_hold_20", func(t *testing.T) {
+		// Sanitized relative-score shape using the public example latency
+		// weights and empty_weight=2, plus the live trust floor of 0.85.
+		// This is enough to keep the observed order and settle notes; it is
+		// not a claim that every live score knob is reproduced exactly.
+		cfg := m.M{
+			"windows_min": []any{60.0, 10.0},
+			"strategy":    "rank",
+			"min_n_rank1": 10.0,
+			"w_min":       0.0,
+			"w_max":       20.0,
+			"trust":       m.M{"enabled": true, "floor": 0.85},
+			"score": m.M{
+				"a_p50": 0.3, "b_p90": 0.3, "c_ttft": 1.5, "t_ref": 20.0,
+				"min_n_window": 5.0, "empty_weight": 2.0, "w_10m": 0.4, "ttft_missing_s": 30.0,
+			},
+			"strategies": m.M{"rank": m.M{"top_w": 20.0, "close_ratio": 0.85, "close_factor": 0.8, "mid_ratio": 0.7, "mid_w": 3.0, "low_w": 0.0, "hysteresis": 0.0, "band": 0.0, "ramp": 0.0, "lead_min_n": 0.0}},
+			"settle":     m.M{"cut_needs_fault": true, "raise_clean": false},
+		}
+		fs := m.Feats{
+			67: {
+				Long:  &m.Window{N: 6, Err: 0, ErrRate: m.F(0), Empty: m.I(2), EmptyRate: m.F(0.3333), SlowRate: m.F(0), P50: m.F(3), P90: m.F(53)},
+				Short: &m.Window{N: 3, Err: 0, ErrRate: m.F(0), Empty: m.I(1), EmptyRate: m.F(0.3333), P50: m.F(5), P90: m.F(53)},
+				Mix:   &m.Mix{NUser: 2, NProbe: 4, NErrReal: 0, ErrRateReal: m.F(0)},
+				Chan:  &m.ChanStat{N: 2, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+			68: {
+				Long:  &m.Window{N: 20, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0), P50: m.F(12), P90: m.F(39)},
+				Short: &m.Window{N: 1, Err: 0, ErrRate: m.F(0), P50: m.F(2), P90: m.F(2)},
+				Mix:   &m.Mix{NUser: 16, NProbe: 4, NErrReal: 0, ErrRateReal: m.F(0)},
+				Chan:  &m.ChanStat{N: 16, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+			72: live72()[72],
+		}
+		d, err := Decide(Input{
+			Cfg:      cfg,
+			Chans:    []m.Channel{{ID: 67}, {ID: 68}, {ID: 72}},
+			Feats:    fs,
+			Strategy: "rank",
+			Prev:     map[int]int{67: 20, 68: 20, 72: 20},
+			Trust:    map[int]float64{67: 0.7802, 68: 1, 72: 0.8034},
+		})
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		if !d.Scores[68].EligibleRank1 || !d.Scores[72].EligibleRank1 || d.Scores[67].EligibleRank1 {
+			t.Fatalf("eligibility=%v want #68/#72 true and #67 false", d.Scores)
+		}
+		if d.Scores[68].N60 != 20 || d.Scores[72].N60 != 127 || d.Scores[67].N60 != 6 {
+			t.Fatalf("n60 unexpected: 68=%d 72=%d 67=%d", d.Scores[68].N60, d.Scores[72].N60, d.Scores[67].N60)
+		}
+		if d.Scores[68].Trust == nil || *d.Scores[68].Trust != 1 || d.Scores[72].Trust == nil || *d.Scores[72].Trust != 0.8034 {
+			t.Fatalf("trust fields=%v", d.Scores)
+		}
+		// Raw scores already have #68 ahead of ample #72 (latency + 1-slow).
+		// The floor=0.85 multiplier only trims #72 further; it is not what
+		// creates the order by itself.
+		if d.Scores[68].RawScore == nil || d.Scores[72].RawScore == nil || *d.Scores[68].RawScore <= *d.Scores[72].RawScore {
+			t.Fatalf("raw scores should already rank #68 ahead, got 68=%v 72=%v", d.Scores[68].RawScore, d.Scores[72].RawScore)
+		}
+		if d.Scores[72].Score >= *d.Scores[72].RawScore {
+			t.Fatalf("#72 trust multiplier should trim the score, raw=%v score=%v", *d.Scores[72].RawScore, d.Scores[72].Score)
+		}
+		if got := d.Order; len(got) != 3 || got[0] != 68 || got[1] != 72 || got[2] != 67 {
+			t.Fatalf("order=%v want [68 72 67] without promoting an ineligible leader", d.Order)
+		}
+		if d.Target[67] != 20 || d.Target[68] != 20 || d.Target[72] != 20 {
+			t.Fatalf("weights=%v want all held at 20", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if strings.Contains(joined, "不得排第一") {
+			t.Fatalf("did not expect a CASE-AW-016 promotion note when the leader is eligible, got %q", d.Notes)
+		}
+		if strings.Contains(joined, "#68 定档") {
+			t.Fatalf("eligible leader already at 20 should not emit a settle note, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#72 定档：策略 0→20") || !strings.Contains(joined, "1h 真实 123") {
+			t.Fatalf("expected #72 low band settled 0→20 on ChanStat 123/0/0, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#67 定档：策略 0→20") || !strings.Contains(joined, "1h 真实 2") {
+			t.Fatalf("expected #67 low band settled 0→20 on ChanStat 2/0/0, got %q", d.Notes)
+		}
+		for _, part := range []string{"无渠道级错误证据", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, d.Notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", d.Notes)
 		}
 	})
 }

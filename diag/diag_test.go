@@ -335,6 +335,27 @@ func TestHangTailFlags(t *testing.T) {
 	}
 }
 
+// CASE-AW-029 addendum: sanitized 8/127 hang-tail shape from 2026-11-21 13:30
+// +08:00 CC #72. Locks the diagnostic wording and that the flag is record-only
+// (the supplied target weight of 20 is echoed, not changed). Defaults match
+// core/hangflags.go: hang_sec=180, min_hang=2, min_share=0.05, probe_tok=1318.
+func TestHangTailFlagsAmpleSlowWindowStillRecordsOnly(t *testing.T) {
+	now := int64(100000)
+	rows := make([]m.Row, 0, 127)
+	for i := 0; i < 119; i++ {
+		rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Ut: 15, Tok: 900003})
+	}
+	for i := 0; i < 7; i++ {
+		rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Ut: 180, Tok: 900003})
+	}
+	rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Ut: 629, Tok: 900003})
+	got := HangTailFlags(rows, map[int]int{72: 20}, now, 180, 2, 0.05, 1318)
+	want := "HANGTAIL #72: 1h 内 8/127 条（6%）总耗时 ≥180s（其中探测 0 条），最长 629s，系统给 20；只记录"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got %v want %q", got, want)
+	}
+}
+
 func TestLoadQueueFlags(t *testing.T) {
 	rows := []m.Row{}
 	// 12 lone fast successes on ch 9

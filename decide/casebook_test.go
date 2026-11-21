@@ -5601,6 +5601,7 @@ func TestCasebookAmpleHourSingleClientErrorInLeanTenMinCutsTrustHard(t *testing.
 		}
 	})
 }
+
 // CASE-AW-050: sanitized aggregate shape from 2026-11-22 06:47 +08:00 GPT #73.
 // No production log rows, request identifiers, model names or real token IDs.
 // Locks current v5.01 behavior; it does not change the algorithm.
@@ -5804,6 +5805,186 @@ func TestCasebookShrunkHourRateCrossesTwoPctAfterCleanTenMinKeepsCuttingTrust(t 
 		raw := StratRank(order, map[int]float64{26: 0.6209, 23: 0.5273, 2: 0.467, 73: 0.4644, 32: 0}, rp, sys, old, nil)
 		if raw[26] != 20 || raw[23] != 3 || raw[2] != 3 || raw[73] != 3 || raw[32] != 0 {
 			t.Fatalf("raw rank weights=%v want 26=20 and 23/2/73=3, 32=0", raw)
+		}
+	})
+}
+
+func TestCasebookErrorLeavingShrunkHourRecoversTrustWithCappedSampleStep(t *testing.T) {
+	now := int64(100000)
+	build := func(shortSuccess, longSuccess, longErr, probes int, status *int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		for n := 0; n < shortSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 30, Type: 2, Tok: 900003})
+		}
+		for n := 0; n < longSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 2, Tok: 900004})
+		}
+		for n := 0; n < longErr; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 5, Tok: 900011, Sc: status})
+		}
+		for n := 0; n < probes; n++ {
+			// Probes sit in the 60m window but outside the 10m window, matching
+			// the observed 10m N=1 that did not include the 5 probes.
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 73}}, rows, now)
+	}
+
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	// Live v5.01 trust keys. up=0.2 and up_full_n=30 are required so the
+	// recovery increment matches production, not the code default 0.08.
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "down": 0.6, "err_10m_min_n": 2, "err_full": 0.2,
+		"err_1h_thr": 0.02, "err_10m_full_n": 0, "t_min": 0.1,
+		"up": 0.2, "up_full_n": 30, "round_min": 45,
+	}}
+	// Inter-round gap is the difference of GPT algorithm now values: 2970s.
+	// 2970/2700=1.1, so the time factor is capped at 1.
+	gap := m.F(2970.0 / 60.0)
+	uncappedGap := m.F(2368.0 / 60.0)
+
+	t.Run("live_shape_clean_0_of_7_recovers_0_562_to_0_6087_capped_step", func(t *testing.T) {
+		// GPT #73 this round: 10m 0/1, 60m 0/7, mix 2 user + 5 probes,
+		// ChanStat N=2 Client=0 Err=0. The leftover client-class error has
+		// left the 1h window after CASE-AW-050's 1/39 shrink cut.
+		fs := build(1, 1, 0, 5, m.I(400))
+		f := fs[73]
+		if f == nil || f.Long == nil || f.Short == nil || f.Mix == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Short.N != 1 || f.Short.Err != 0 {
+			t.Fatalf("10m window n=%d err=%d want 1/0", f.Short.N, f.Short.Err)
+		}
+		if f.Long.N != 7 || f.Long.Err != 0 {
+			t.Fatalf("1h window n=%d err=%d want 7/0", f.Long.N, f.Long.Err)
+		}
+		if m.Or(f.Long.ErrRate, 0) != 0 {
+			t.Fatalf("1h err rate=%v want 0", f.Long.ErrRate)
+		}
+		if f.Mix.NUser != 2 || f.Mix.NProbe != 5 || f.Mix.NErrReal != 0 {
+			t.Fatalf("mix=%+v want NUser=2 NProbe=5 NErrReal=0", f.Mix)
+		}
+		if f.Chan.N != 2 || f.Chan.Err != 0 || f.Chan.Client != 0 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=2 Err=0 Client=0 Eff=0 Rate=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 0.562}, gap)[73]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// Capped time factor 1, sample factor 7/30:
+		// 0.562 + 0.2*(7/30) = 0.608666... -> 0.6087.
+		// Recovery uses scoring n60=7, not ChanStat / 真实 n=2
+		// (that would have been 0.562+0.2*(2/30)=0.5753).
+		// It is also not the CASE-AW-050 counterfactual 0.7470, which used
+		// prev=0.5716, the uncapped 2368s gap, and an ample n60.
+		if st.Sev != 0 || st.Trust != 0.6087 || len(st.Why) != 0 {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0 / 0.6087 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+
+	t.Run("leftover_1_of_39_with_same_capped_gap_still_cuts", func(t *testing.T) {
+		// Contrast: keep CASE-AW-050's leftover 1/39=2.56% error, but use
+		// this round's capped 2970s gap and the post-cut prev=0.562.
+		// Recovery must not start merely because more time has passed.
+		fs := build(1, 33, 1, 4, m.I(400))
+		f := fs[73]
+		if f.Short.N != 1 || f.Short.Err != 0 || f.Long.N != 39 || f.Long.Err != 1 {
+			t.Fatalf("windows short=%+v long=%+v want 10m 1/0 and 1h 39/1", f.Short, f.Long)
+		}
+		if m.Or(f.Long.ErrRate, 0) <= 0.02 {
+			t.Fatalf("1h err rate=%v should still cross 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 0.562}, gap)[73]
+		// sev stays 0.028; down path ignores the time factor:
+		// 0.562*(1-0.6*0.028)=0.5525584... -> 0.5526.
+		if st.Sev != 0.028 || st.Trust != 0.5526 {
+			t.Fatalf("trust sev=%v value=%v want 0.028 / 0.5526", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "1h 错误率 2.6%" {
+			t.Fatalf("trust why=%v want [1h 错误率 2.6%%]", st.Why)
+		}
+	})
+
+	t.Run("same_clean_0_of_7_with_previous_uncapped_gap_recovers_less", func(t *testing.T) {
+		// Contrast: same clean 0/7 window and prev=0.562, but the previous
+		// uncapped 2368s gap. This must not be reported as 0.6087 or 0.7470.
+		fs := build(1, 1, 0, 5, m.I(400))
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 0.562}, uncappedGap)[73]
+		// 0.562 + 0.2*(2368/2700)*(7/30) = 0.602888... -> 0.6029
+		if st.Sev != 0 || st.Trust != 0.6029 || len(st.Why) != 0 {
+			t.Fatalf("uncapped contrast sev=%v value=%v why=%v want 0 / 0.6029 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+
+	t.Run("ample_clean_window_with_capped_gap_recovers_full_step_from_0_562", func(t *testing.T) {
+		// Contrast: once n60>=30 the sample factor is 1, so a clean capped
+		// window would add the full +0.2: 0.562+0.2=0.762. That is not the
+		// live 0.6087, and it is also not CASE-AW-050's 0.7470 counterfactual
+		// (prev=0.5716, uncapped 2368s, ample n).
+		fs := build(1, 25, 0, 4, m.I(400))
+		f := fs[73]
+		if f.Short.N != 1 || f.Short.Err != 0 || f.Long.N != 30 || f.Long.Err != 0 {
+			t.Fatalf("windows short=%+v long=%+v want 10m 1/0 and 1h 30/0", f.Short, f.Long)
+		}
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 0.562}, gap)[73]
+		if st.Sev != 0 || st.Trust != 0.762 || len(st.Why) != 0 {
+			t.Fatalf("ample contrast sev=%v value=%v why=%v want 0 / 0.762 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+
+	t.Run("settle_holds_16_to_20_with_chanstat_2_0_0", func(t *testing.T) {
+		fs := build(1, 1, 0, 5, m.I(400))
+		next := map[int]int{73: 16}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{73: 20}, fs, []int{73}, nil, &notes)
+		if next[73] != 20 {
+			t.Fatalf("weight=%d want 20 after 16->20 hold", next[73])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#73 定档：策略 16→20", "无渠道级错误证据", "1h 真实 2", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+
+	t.Run("rank_promotes_eligible_leader_and_keeps_ineligible_high_score_at_close", func(t *testing.T) {
+		// Live post-trust scores this round, after Multiplier floor=0.85:
+		// 0.85+0.15*0.6087=0.941305, raw 0.792 -> 0.7455.
+		// #73=0.7455 (n60=7, ineligible), #32=0.7045 (n60=8, ineligible),
+		// #26=0.5383 (n60=190, eligible leader after promotion),
+		// #23=0.4808 (ratio 0.8932), #2=0.3685 (ratio 0.6846 < 0.7).
+		// Production mid_ratio=0.7, mid_w=3, close_ratio=0.85, close_factor=0.8,
+		// low_w=0, lead_min_n=0. After "#73 样本不足，不得排第一，由 #26 顶上",
+		// the live pre-settle targets are 26=20, 73/32/23=16, 2=0.
+		rp := RankParams{P: m.M{
+			"top_w": 20, "close_ratio": 0.85, "close_factor": 0.8,
+			"mid_ratio": 0.7, "mid_w": 3, "low_w": 0, "tie_ratio": 0.95,
+			"hysteresis": 0, "band": 0, "ramp": 0, "lead_trust": 0,
+			"lead_min_n": 0, "co_lead_ratio": 0,
+		}}
+		old := map[int]int{26: 20, 73: 20, 32: 20, 23: 20, 2: 20}
+		sys := m.M{"w_total": 18}
+		order := []int{26, 73, 32, 23, 2}
+
+		got := StratRank(order, map[int]float64{26: 0.5383, 73: 0.7455, 32: 0.7045, 23: 0.4808, 2: 0.3685}, rp, sys, old, nil)
+		if got[26] != 20 || got[73] != 16 || got[32] != 16 || got[23] != 16 || got[2] != 0 {
+			t.Fatalf("post-promotion rank weights=%v want 26=20, 73/32/23=16, 2=0", got)
+		}
+
+		// If eligibility did not promote #26, score order would give #73 top_w.
+		// Ratios are then against 0.7455, so #32 stays close (0.9450), #26 is
+		// only mid (0.7221), and #23/#2 fall below 0.7.
+		rawOrder := []int{73, 32, 26, 23, 2}
+		raw := StratRank(rawOrder, map[int]float64{26: 0.5383, 73: 0.7455, 32: 0.7045, 23: 0.4808, 2: 0.3685}, rp, sys, old, nil)
+		if raw[73] != 20 || raw[32] != 16 || raw[26] != 3 || raw[23] != 0 || raw[2] != 0 {
+			t.Fatalf("score-order rank weights=%v want 73=20, 32=16, 26=3, 23/2=0", raw)
 		}
 	})
 }

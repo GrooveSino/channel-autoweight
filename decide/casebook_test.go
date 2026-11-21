@@ -1144,3 +1144,106 @@ func TestCasebookThinRealSlowRateCutsTrustButSettleHolds(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-025: sanitized relative-score shape from 2026-11-21 09:46 +08:00 CC #72/#68/#67.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior when every channel misses rank-1 eligibility:
+// the score order is kept, no promotion note is emitted, and settle holds 20.
+// It does not change the algorithm.
+func TestCasebookAllIneligibleRank1KeepsOrderAndSettleHolds(t *testing.T) {
+	cfg := m.M{
+		"windows_min": []any{60.0, 10.0},
+		"strategy":    "rank",
+		"min_n_rank1": 10.0,
+		"w_min":       0.0,
+		"w_max":       20.0,
+		"score":       m.M{"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0, "min_n_window": 5.0, "empty_weight": 0.0, "w_10m": 0.0, "ttft_missing_s": 30.0},
+		"strategies":  m.M{"rank": m.M{"top_w": 20.0, "close_ratio": 0.85, "close_factor": 0.8, "mid_ratio": 0.7, "mid_w": 3.0, "low_w": 0.0, "hysteresis": 0.0, "band": 0.0, "ramp": 0.0, "lead_min_n": 0.0}},
+		"settle":      m.M{"cut_needs_fault": true, "raise_clean": false},
+	}
+	// p50 4/5/20 => scores 20/24, 20/25, 20/40. Second is inside the close
+	// band (0.96); third is below mid_ratio (0.60). The 0.5 third score also
+	// keeps the set below tie_ratio, so all-tie split does not fire.
+	feat := func(n60, chanN int, p50 float64) *m.Feat {
+		return &m.Feat{
+			Long: &m.Window{N: n60, P50: m.F(p50), P90: m.F(p50), ErrRate: m.F(0)},
+			Chan: &m.ChanStat{N: chanN, Err: 0, Eff: 0, Rate: 0},
+		}
+	}
+	run := func(n60Second int) *Decision {
+		t.Helper()
+		d, err := Decide(Input{
+			Cfg:      cfg,
+			Chans:    []m.Channel{{ID: 67}, {ID: 68}, {ID: 72}},
+			Feats:    m.Feats{72: feat(5, 1, 4), 68: feat(n60Second, 1, 5), 67: feat(8, 0, 20)},
+			Strategy: "rank",
+			Prev:     map[int]int{67: 20, 68: 20, 72: 20},
+		})
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		return d
+	}
+
+	t.Run("all_ineligible_keeps_score_order_and_holds_20", func(t *testing.T) {
+		d := run(5)
+		for _, id := range []int{72, 68, 67} {
+			if d.Scores[id].EligibleRank1 {
+				t.Fatalf("#%d n60=%d should be ineligible for rank 1", id, d.Scores[id].N60)
+			}
+		}
+		if got := d.Order; len(got) != 3 || got[0] != 72 || got[1] != 68 || got[2] != 67 {
+			t.Fatalf("order=%v want [72 68 67] with the ineligible leader left first", d.Order)
+		}
+		if d.Target[72] != 20 || d.Target[68] != 20 || d.Target[67] != 20 {
+			t.Fatalf("weights=%v want all held at 20", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if strings.Contains(joined, "不得排第一") {
+			t.Fatalf("did not expect a promotion note when nobody is eligible, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#68 定档：策略 16→20") || !strings.Contains(joined, "1h 真实 1") {
+			t.Fatalf("expected #68 close band settled 16→20, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#67 定档：策略 0→20") || !strings.Contains(joined, "1h 真实 0") {
+			t.Fatalf("expected #67 low band settled 0→20, got %q", d.Notes)
+		}
+		if strings.Contains(joined, "#72 定档") {
+			t.Fatalf("strategy already 20 for the ineligible leader should not emit a settle note, got %q", d.Notes)
+		}
+		for _, part := range []string{"无渠道级错误证据", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, d.Notes)
+			}
+		}
+	})
+
+	t.Run("eligible_second_is_promoted", func(t *testing.T) {
+		d := run(12)
+		if d.Scores[72].EligibleRank1 || d.Scores[67].EligibleRank1 {
+			t.Fatalf("thin channels should stay ineligible, scores=%v", d.Scores)
+		}
+		if !d.Scores[68].EligibleRank1 {
+			t.Fatalf("n60=12 should be eligible for rank 1")
+		}
+		if d.Order[0] != 68 {
+			t.Fatalf("order=%v want #68 first after promotion", d.Order)
+		}
+		if d.Target[72] != 20 || d.Target[68] != 20 || d.Target[67] != 20 {
+			t.Fatalf("weights=%v want all held at 20 after promotion", d.Target)
+		}
+		joined := strings.Join(d.Notes, ";")
+		if !strings.Contains(joined, "#72 样本不足，不得排第一，由 #68 顶上") {
+			t.Fatalf("missing promotion note, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#72 定档：策略 16→20") {
+			t.Fatalf("expected former leader to land in the close band 16→20, got %q", d.Notes)
+		}
+		if !strings.Contains(joined, "#67 定档：策略 0→20") {
+			t.Fatalf("expected #67 to stay in the low band 0→20, got %q", d.Notes)
+		}
+		if strings.Contains(joined, "#68 定档") {
+			t.Fatalf("promoted leader already at 20 should not emit a settle note, got %q", d.Notes)
+		}
+	})
+}

@@ -1247,3 +1247,90 @@ func TestCasebookAllIneligibleRank1KeepsOrderAndSettleHolds(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-026: sanitized aggregate shape from 2026-11-21 10:33 +08:00 GPT #26.
+// No production log rows, request identifiers, model names or real token IDs.
+// When one token accounts for all channel errors but TopErr equals tok_cap (2),
+// the guard TopErr > tokCap does not fire, so Eff stays Err=2. This locks
+// current v5.01 ChanStats and Settle behavior; it does not change the algorithm.
+func TestCasebookTopErrEqualTokCapDoesNotDiscount(t *testing.T) {
+	// Live shape: N=236, Err=2, Client=0, TopErr=2, ErrTok=1, Toks=8,
+	// Eff=2, Rate=2/(236-2+2)=2/236=.0085.
+	successes := func(n, startTok, tokCount int) []m.Row {
+		rows := make([]m.Row, 0, n)
+		for i := 0; i < n; i++ {
+			rows = append(rows, m.Row{Ch: 26, T: 100, Type: 2, Tok: startTok + i%tokCount})
+		}
+		return rows
+	}
+	errorsOn := func(n, tok int) []m.Row {
+		rows := make([]m.Row, 0, n)
+		for i := 0; i < n; i++ {
+			rows = append(rows, m.Row{Ch: 26, T: 100, Type: 5, Tok: tok, Sc: m.I(502)})
+		}
+		return rows
+	}
+
+	t.Run("toperr_equals_tokcap_does_not_discount", func(t *testing.T) {
+		rows := append(successes(234, 900002, 7), errorsOn(2, 900001)...)
+		stats := features.ChanStats(m.M{}, rows, 0, 2, .8)[26]
+		if stats.N != 236 || stats.Err != 2 || stats.Client != 0 || stats.Eff != 2 || stats.TopErr != 2 || stats.ErrTok != 1 || stats.Toks != 8 || stats.Rate != .0085 {
+			t.Fatalf("unexpected channel evidence: %+v", stats)
+		}
+		if stats.Eff != stats.Err {
+			t.Fatalf("discount should not fire when TopErr==tokCap, Eff=%d Err=%d", stats.Eff, stats.Err)
+		}
+		next := map[int]int{26: 16}
+		var notes []string
+		cfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+		fs := m.Feats{26: {Chan: stats, Long: &m.Window{N: 240, ErrRate: m.F(2.0 / 240)}}}
+		Settle(cfg, next, map[int]int{26: 20}, fs, []int{26}, nil, &notes)
+		if next[26] != 20 {
+			t.Fatalf("weight=%d want 20", next[26])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"无渠道级错误证据", "1h 真实 236", "渠道错误 2", "去集中 2", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a cut note, got %q", notes)
+		}
+	})
+
+	t.Run("toperr_above_tokcap_discounts_to_cap_still_holds", func(t *testing.T) {
+		// Same 234 successes on other tokens, but 5 non-capacity errors on one token.
+		// TopErr=5>2, share=100%, otherOK>0, so Eff=5-5+2=2.
+		rows := append(successes(234, 900002, 7), errorsOn(5, 900001)...)
+		stats := features.ChanStats(m.M{}, rows, 0, 2, .8)[26]
+		if stats.N != 239 || stats.Err != 5 || stats.TopErr != 5 || stats.Eff != 2 || stats.Rate != .0085 {
+			t.Fatalf("expected discount to tokCap, got %+v", stats)
+		}
+		next := map[int]int{26: 16}
+		cfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+		Settle(cfg, next, map[int]int{26: 20}, m.Feats{26: {Chan: stats, Long: &m.Window{N: 239}}}, []int{26}, nil, nil)
+		if next[26] != 20 {
+			t.Fatalf("weight=%d want 20 after discount to Eff=2", next[26])
+		}
+	})
+
+	t.Run("spread_errors_meeting_gate_are_cut", func(t *testing.T) {
+		// Contrast: three spread 500s plus enough successes, no dominant token.
+		rows := append(successes(27, 900002, 7),
+			m.Row{Ch: 26, T: 100, Type: 5, Tok: 900001, Sc: m.I(502)},
+			m.Row{Ch: 26, T: 100, Type: 5, Tok: 900002, Sc: m.I(502)},
+			m.Row{Ch: 26, T: 100, Type: 5, Tok: 900003, Sc: m.I(502)},
+		)
+		stats := features.ChanStats(m.M{}, rows, 0, 2, .8)[26]
+		if stats.N != 30 || stats.Err != 3 || stats.Eff != 3 || stats.Rate != .1 {
+			t.Fatalf("expected undiscounted 3/30=.1, got %+v", stats)
+		}
+		next := map[int]int{26: 20}
+		cfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+		Settle(cfg, next, map[int]int{26: 20}, m.Feats{26: {Chan: stats, Long: &m.Window{N: 30, ErrRate: m.F(0.1)}}}, []int{26}, nil, nil)
+		if next[26] != 18 {
+			t.Fatalf("weight=%d want 18 once the 30/3/3%% gate is met", next[26])
+		}
+	})
+}

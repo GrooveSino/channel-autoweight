@@ -5407,3 +5407,197 @@ func TestCasebookProbeOnlyCleanWindowContinuesUncappedRecoveryAfterEarlyInterval
 		}
 	})
 }
+
+// CASE-AW-049: sanitized aggregate shape from 2026-11-22 06:07 +08:00 GPT #73.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior; it does not change the algorithm.
+//
+// An ample 1h window (raw 1/178=0.56% < 2%, ChanStat N=173 Client=1 Err=0)
+// still takes a hard trust cut when a lean but non-tiny 10m window is 1/7.
+// SeverityParts reads the raw 10m rate, so one client-class error yields
+// sev=min(1, (1/7)/0.2)=0.714. Update then does 1*(1-0.6*0.714)=0.5716.
+// The 1h path does not fire. err_10m_full_n is 0, so the lean denominator
+// is not scaled down. Settle still holds 20 because 30/3/3% is not met.
+func TestCasebookAmpleHourSingleClientErrorInLeanTenMinCutsTrustHard(t *testing.T) {
+	now := int64(100000)
+	build := func(shortSuccess, shortErr, longSuccess, longErr, probes int, status *int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		for n := 0; n < shortSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 30, Type: 2, Tok: 900003})
+		}
+		for n := 0; n < shortErr; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 30, Type: 5, Tok: 900010, Sc: status})
+		}
+		for n := 0; n < longSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 2, Tok: 900004})
+		}
+		for n := 0; n < longErr; n++ {
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 5, Tok: 900011, Sc: status})
+		}
+		for n := 0; n < probes; n++ {
+			// Probes sit in the 60m window but outside the 10m window, matching
+			// the observed 10m N that did not include the 4 probes.
+			rows = append(rows, m.Row{Ch: 73, T: now - 40*60, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 73}}, rows, now)
+	}
+
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	// Live v5.01 trust keys used on the down path. err_10m_full_n=0 is the
+	// production default: lean 10m windows are not severity-scaled by n.
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "down": 0.6, "err_10m_min_n": 2, "err_full": 0.2,
+		"err_1h_thr": 0.02, "err_10m_full_n": 0, "t_min": 0.1,
+	}}
+
+	t.Run("live_shape_10m_1_of_7_cuts_1_to_0_5716_while_1h_stays_under_2pct", func(t *testing.T) {
+		// GPT #73 this round: 10m 1/7, 60m 1/178, mix 174 user + 4 probes,
+		// ChanStat N=173 Client=1 Err=0. 1h raw 1/178=0.56% is below 2%.
+		fs := build(6, 1, 167, 0, 4, m.I(400))
+		f := fs[73]
+		if f == nil || f.Long == nil || f.Short == nil || f.Mix == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Short.N != 7 || f.Short.Err != 1 {
+			t.Fatalf("10m window n=%d err=%d want 7/1", f.Short.N, f.Short.Err)
+		}
+		if f.Long.N != 178 || f.Long.Err != 1 {
+			t.Fatalf("1h window n=%d err=%d want 178/1", f.Long.N, f.Long.Err)
+		}
+		if m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h err rate=%v should stay under 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		if f.Mix.NUser != 174 || f.Mix.NProbe != 4 || f.Mix.NErrReal != 1 {
+			t.Fatalf("mix=%+v want NUser=174 NProbe=4 NErrReal=1", f.Mix)
+		}
+		if f.Chan.N != 173 || f.Chan.Err != 0 || f.Chan.Client != 1 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=173 Err=0 Client=1 Eff=0 Rate=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 1}, nil)[73]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=min(1, (1/7)/0.2)=0.714285... -> 0.714
+		// 1*(1-0.6*0.714)=0.5716. The 1h path is silent because 0.56% < 2%.
+		if st.Sev != 0.714 || st.Trust != 0.5716 {
+			t.Fatalf("trust sev=%v value=%v want 0.714 / 0.5716", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "10m 错误 1/7" {
+			t.Fatalf("trust why=%v want [10m 错误 1/7]", st.Why)
+		}
+	})
+
+	t.Run("same_client_error_outside_10m_does_not_cut", func(t *testing.T) {
+		// Contrast: move the single client-class error out of the 10m window
+		// while keeping the same 1h 1/178 < 2%. Trust must stay at 1 because
+		// the live cut came from the lean 10m denominator, not the 1h rate.
+		fs := build(7, 0, 166, 1, 4, m.I(400))
+		f := fs[73]
+		if f.Short.N != 7 || f.Short.Err != 0 {
+			t.Fatalf("10m window n=%d err=%d want 7/0", f.Short.N, f.Short.Err)
+		}
+		if f.Long.N != 178 || f.Long.Err != 1 || m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h window=%+v want 178/1 under 2%%", f.Long)
+		}
+		if f.Chan.N != 173 || f.Chan.Err != 0 || f.Chan.Client != 1 || f.Chan.Eff != 0 {
+			t.Fatalf("chanstat=%+v want N=173 Err=0 Client=1 Eff=0", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 1}, nil)[73]
+		if st.Sev != 0 || st.Trust != 1 || len(st.Why) != 0 {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0 / 1 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+
+	t.Run("same_1_of_7_as_500_keeps_same_trust", func(t *testing.T) {
+		// Contrast: trust still follows raw 10m 1/7 when the type5 is a
+		// channel 500. ChanStat now counts 1 fault, but Eff=1 is below 3.
+		fs := build(6, 1, 167, 0, 4, m.I(500))
+		f := fs[73]
+		if f.Short.N != 7 || f.Short.Err != 1 || f.Long.N != 178 || f.Long.Err != 1 {
+			t.Fatalf("raw windows short=%+v long=%+v want 7/1 and 178/1", f.Short, f.Long)
+		}
+		if f.Chan.N != 174 || f.Chan.Err != 1 || f.Chan.Client != 0 || f.Chan.Eff != 1 {
+			t.Fatalf("chanstat=%+v want N=174 Err=1 Client=0 Eff=1", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 1}, nil)[73]
+		if st.Sev != 0.714 || st.Trust != 0.5716 || len(st.Why) != 1 || st.Why[0] != "10m 错误 1/7" {
+			t.Fatalf("trust should still follow raw 10m 1/7, got sev=%v value=%v why=%v", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{73: 0}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{73: 20}, fs, []int{73}, nil, &notes)
+		if next[73] != 20 {
+			t.Fatalf("weight=%d want 20; Eff=1 is still below 3", next[73])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 174") || !strings.Contains(joined, "渠道错误 1") || !strings.Contains(joined, "去集中 1") {
+			t.Fatalf("expected hold note with ChanStat 174/1/1, got %q", notes)
+		}
+	})
+
+	t.Run("larger_10m_1_of_59_is_much_milder", func(t *testing.T) {
+		// Same single client-class error in a larger non-tiny 10m window.
+		// This isolates the lean denominator: 1/59 must not be rewritten as
+		// the live 1/7 cut to 0.5716.
+		fs := build(58, 1, 115, 0, 4, m.I(400))
+		f := fs[73]
+		if f.Short.N != 59 || f.Short.Err != 1 {
+			t.Fatalf("10m window n=%d err=%d want 59/1", f.Short.N, f.Short.Err)
+		}
+		st := trust.Step(trustCfg, []int{73}, fs, nil, map[int]float64{73: 1}, nil)[73]
+		if !((st.Sev == 0.085 && st.Trust == 0.949) || (st.Sev == 0.084 && st.Trust == 0.9496)) {
+			t.Fatalf("larger 10m trust sev=%v value=%v want 0.085/0.949 or 0.084/0.9496", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "10m 错误 1/59" {
+			t.Fatalf("trust why=%v want [10m 错误 1/59]", st.Why)
+		}
+		if st.Sev >= 0.5 || st.Trust < 0.9 {
+			t.Fatalf("1/59 must stay far milder than live 1/7 (0.714/0.5716), got sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("settle_holds_0_to_20_with_chanstat_173_0_0", func(t *testing.T) {
+		fs := build(6, 1, 167, 0, 4, m.I(400))
+		next := map[int]int{73: 0}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{73: 20}, fs, []int{73}, nil, &notes)
+		if next[73] != 20 {
+			t.Fatalf("weight=%d want 20 after 0->20 hold", next[73])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#73 定档：策略 0→20", "无渠道级错误证据", "1h 真实 173", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+
+	t.Run("rank_assigns_low_w_0_when_score_ratio_is_below_mid_ratio", func(t *testing.T) {
+		// Live post-trust scores this round, after Multiplier floor=0.85:
+		// #26=0.554 (thin clean leader, n60=14 >= min_n_rank1=10),
+		// #2=0.3727 (ratio 0.6727 < mid_ratio 0.7),
+		// #73=0.2746 (ratio 0.4957), #23=0, #32=0.
+		// lead_min_n=0, so the thin eligible leader is the denominator.
+		// Production mid_ratio=0.7, low_w=0, ramp=0: all but #26 get 0.
+		// This does not claim the trust cut alone caused the 0: #73 raw
+		// 0.2935/0.554 and #2 raw 0.3755/0.554 are also below 0.7.
+		sc := map[int]float64{26: 0.554, 2: 0.3727, 73: 0.2746, 23: 0, 32: 0}
+		order := []int{26, 2, 73, 23, 32}
+		rp := RankParams{P: m.M{
+			"top_w": 20, "close_ratio": 0.85, "close_factor": 0.8,
+			"mid_ratio": 0.7, "mid_w": 3, "low_w": 0, "tie_ratio": 0.95,
+			"hysteresis": 0, "band": 0, "ramp": 0, "lead_trust": 0,
+			"lead_min_n": 0, "co_lead_ratio": 0,
+		}}
+		got := StratRank(order, sc, rp, m.M{"w_total": 18}, map[int]int{26: 20, 2: 20, 73: 20, 23: 20, 32: 20}, nil)
+		if got[26] != 20 || got[2] != 0 || got[73] != 0 || got[23] != 0 || got[32] != 0 {
+			t.Fatalf("rank weights=%v want 26=20 and 2/73/23/32=0", got)
+		}
+	})
+}

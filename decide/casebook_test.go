@@ -185,6 +185,93 @@ func TestCasebookAllClientThinWindowTrustCapHeld(t *testing.T) {
 	}
 }
 
+
+// CASE-AW-031: sanitized aggregate shape from 2026-11-21 16:33 +08:00 CC #67.
+// No production log rows, request identifiers, model names or real token IDs.
+// Unlike CASE-AW-015 / TestCasebookAllClientThinWindowTrustCapHeld, the scoring
+// window is already n60=34 (>=20), so the recovery-period cap of 3 is not
+// computed. Trust still reads the raw 11/34=32.4% window (all 11 type5 are
+// client-class) and hits the 0.1 floor. ChanStat is N=19, Err=0, Client=11,
+// Eff=0 and does not meet 30/3/3%, so a strategy target of 0 is settled back
+// to 20. This locks current v5.01 behavior; it does not change the algorithm.
+func TestCasebookAllClientAmpleWindowTrustFloorHeld(t *testing.T) {
+	now := int64(100000)
+	var rows []m.Row
+	// 10m window (28): 16 real successes, 1 empty type2, 11 client-class faults.
+	for n := 0; n < 16; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900100 + n, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900200, Ct: 0, Ut: 5})
+	for n := 0; n < 11; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 5, Tok: 900300 + n, Sc: m.I(400)})
+	}
+	// Older than 10m, still inside 60m (6): 4 probe successes, 1 empty, 1 real success.
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 1318, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900400, Ct: 0, Ut: 5})
+	rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900401, Ct: 300, Ut: 5})
+
+	featCfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+	fs := features.Build(featCfg, []m.Channel{{ID: 67}}, rows, now)
+	f := fs[67]
+	if f == nil || f.Long == nil || f.Short == nil || f.Chan == nil {
+		t.Fatalf("missing features: %+v", f)
+	}
+	if f.Long.N != 34 || f.Long.Err != 11 {
+		t.Fatalf("raw 60m n=%d err=%d want 34/11", f.Long.N, f.Long.Err)
+	}
+	rate := m.Or(f.Long.ErrRate, 0)
+	if rate != m.Round(11.0/34.0, 4) {
+		t.Fatalf("raw err rate=%v want rounded 11/34=0.3235", rate)
+	}
+	if f.Long.Empty == nil || *f.Long.Empty != 2 {
+		t.Fatalf("60m empty=%v want 2", f.Long.Empty)
+	}
+	if f.Short.N != 28 || f.Short.Err != 11 {
+		t.Fatalf("raw 10m n=%d err=%d want 28/11", f.Short.N, f.Short.Err)
+	}
+	if f.Chan.N != 19 || f.Chan.Err != 0 || f.Chan.Client != 11 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+		t.Fatalf("chanstat=%+v want N=19 Err=0 Client=11 Eff=0 Rate=0", f.Chan)
+	}
+
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+	st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.2306}, nil)[67]
+	if st == nil {
+		t.Fatal("missing trust state")
+	}
+	if st.Sev != 1 || st.Trust != 0.1 {
+		t.Fatalf("trust sev=%v value=%v want 1 / 0.1", st.Sev, st.Trust)
+	}
+	if len(st.Why) != 2 || st.Why[0] != "10m 错误 11/28" || st.Why[1] != "1h 错误率 32.4%" {
+		t.Fatalf("trust why=%v want [10m 错误 11/28, 1h 错误率 32.4%%]", st.Why)
+	}
+
+	capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+	caps := map[int]*Cap{}
+	applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: f.Long.N}}, map[int]float64{67: st.Trust}, []int{67})
+	if caps[67] != nil {
+		t.Fatalf("trust cap=%+v; n60=34 is not < 20 so recovery cap 3 must not be computed", caps[67])
+	}
+
+	next := map[int]int{67: 0}
+	var notes []string
+	Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, caps, &notes)
+	if next[67] != 20 {
+		t.Fatalf("weight=%d want 20; strategy 0 must be settled back without a trust cap", next[67])
+	}
+	joined := strings.Join(notes, ";")
+	for _, part := range []string{"#67 定档：策略 0→20", "无渠道级错误证据", "1h 真实 19", "渠道错误 0", "去集中 0"} {
+		if !strings.Contains(joined, part) {
+			t.Fatalf("expected settle note to contain %q, got %q", part, notes)
+		}
+	}
+	for _, part := range []string{"系统上限 3", "不执行"} {
+		if strings.Contains(joined, part) {
+			t.Fatalf("ample n60 must not mention held recovery cap %q, got %q", part, notes)
+		}
+	}
+}
 // CASE-AW-016: sanitized relative-score shape from 2026-11-21 03:06 +08:00 GPT #23/#32.
 // No production log rows, request identifiers, model names or real token IDs.
 // Locks current v5.01 rank-1 eligibility and settle raise; it does not change the algorithm.

@@ -1029,3 +1029,118 @@ func TestCasebookSlightlyOver2pctBlocksTrustRecovery(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-024: sanitized aggregate shape from 2026-11-21 09:01 +08:00 CC #72.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 trust+settle semantics; it does not change the algorithm.
+// Counterpart to CASE-AW-020: the 1h slow-rate penalty still fires when the
+// window is thin but not empty (16 real requests + 4 probes), and Settle still
+// holds 20 because ChanStat N=16 misses the 30/3/3% gate.
+func TestCasebookThinRealSlowRateCutsTrustButSettleHolds(t *testing.T) {
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08). down,
+	// slow threshold and recovery knobs match Defaults / the live file so
+	// the 0.9868->0.8092 arithmetic and the <=15% recovery contrast do not
+	// silently depend on a different default.
+	cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of CC algorithm now values: 2789s.
+	gap := m.F(2789.0 / 60.0)
+	live := func() m.Feats {
+		return m.Feats{
+			72: {
+				Long:  &m.Window{N: 20, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0.25), P50: m.F(26), P90: m.F(240)},
+				Short: &m.Window{N: 0, Err: 0},
+				Mix:   &m.Mix{NUser: 16, NProbe: 4, NErrReal: 0, ErrRateReal: m.F(0)},
+				Chan:  &m.ChanStat{N: 16, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			},
+		}
+	}
+
+	t.Run("live_shape_penalizes_trust_0_9868_to_0_8092", func(t *testing.T) {
+		st := trust.Step(cfg, []int{72}, live(), nil, map[int]float64{72: 0.9868}, gap)[72]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// N=20>=slow_min_n and SlowRate=25%>15% => fixed sev=0.3.
+		// Update takes the down branch: 0.9868*(1-0.6*0.3)=0.809176 -> 0.8092.
+		if st.Sev != 0.3 || st.Trust != 0.8092 {
+			t.Fatalf("trust sev=%v value=%v want 0.3 / 0.8092", st.Sev, st.Trust)
+		}
+		if !strings.Contains(strings.Join(st.Why, ";"), "1h 慢请求 25%") {
+			t.Fatalf("expected slow-rate trust note, got %q", st.Why)
+		}
+	})
+
+	t.Run("thin_real_chanstat_does_not_block_penalty", func(t *testing.T) {
+		fs := live()
+		// Even an ample clean ChanStat cannot stop a scoring-window slow penalty.
+		fs[72].Chan = &m.ChanStat{N: 100, Err: 0, Client: 0, Eff: 0, Rate: 0}
+		st := trust.Step(cfg, []int{72}, fs, nil, map[int]float64{72: 0.9868}, gap)[72]
+		if st.Sev != 0.3 || st.Trust != 0.8092 {
+			t.Fatalf("trust still reads the scoring window, sev=%v value=%v", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("at_or_below_slow_threshold_recovers_toward_1", func(t *testing.T) {
+		for _, rate := range []float64{0.15, 0.14} {
+			fs := live()
+			fs[72].Long.SlowRate = m.F(rate)
+			st := trust.Step(cfg, []int{72}, fs, nil, map[int]float64{72: 0.9868}, gap)[72]
+			// sev=0, so recovery: 0.9868 + 0.2*min(1, 2789/60/45)*min(1, 20/30)
+			// gap>45m so g=1; 0.9868+0.2*(20/30)=1.12013... capped at 1.
+			if st.Sev != 0 || st.Trust != 1 {
+				t.Fatalf("slow_rate=%v must recover to 1, sev=%v value=%v", rate, st.Sev, st.Trust)
+			}
+			if strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+				t.Fatalf("did not expect slow-rate note at %v, got %q", rate, st.Why)
+			}
+		}
+	})
+
+	t.Run("n_below_slow_min_does_not_penalize", func(t *testing.T) {
+		fs := live()
+		fs[72].Long.N = 4
+		st := trust.Step(cfg, []int{72}, fs, nil, map[int]float64{72: 0.9868}, gap)[72]
+		// N=4 < slow_min_n=5: no slow penalty. Recovery uses scoring N=4:
+		// 0.9868 + 0.2*1*min(1, 4/30)=1.01346... capped at 1.
+		if st.Sev != 0 || st.Trust != 1 {
+			t.Fatalf("n=4 must not apply slow penalty, sev=%v value=%v", st.Sev, st.Trust)
+		}
+		if strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("did not expect slow-rate note, got %q", st.Why)
+		}
+	})
+
+	t.Run("settle_holds_20_from_strategy_6", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{72: 6}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[72], notes)
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"定档：策略 6→20", "无渠道级错误证据", "1h 真实 16", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+
+	t.Run("strategy_already_20_has_no_settle_note", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{72: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[72], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("strategy already 20 should not emit a settle note, got %q", notes)
+		}
+	})
+}

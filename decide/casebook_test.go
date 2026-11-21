@@ -919,3 +919,113 @@ func TestCasebookThinWindowErrorCrashesTrustButSettleHolds(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-023: sanitized follow-up to CASE-AW-022 from 2026-11-21 08:15 +08:00 CC #67.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 trust+settle semantics; it does not change the algorithm.
+func TestCasebookSlightlyOver2pctBlocksTrustRecovery(t *testing.T) {
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08). down and
+	// err_1h_thr match Defaults / the live file so the 0.4->0.3976 arithmetic
+	// and the blocked-recovery contrast do not silently depend on a different default.
+	cfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2473s.
+	gap := m.F(2473.0 / 60.0)
+	// Scoring window 2/91=2.20% stored as ErrRate=0.022. Mix real errors 2/89=2.25%.
+	// ChanStat after excluding one client-class error: N=88, Err=1, Eff=1, Rate=1/88.
+	live := func() m.Feats {
+		return m.Feats{
+			67: {
+				Long:  &m.Window{N: 91, Err: 2, ErrRate: m.F(0.022)},
+				Short: &m.Window{N: 0, Err: 0},
+				Mix:   &m.Mix{NUser: 89, NProbe: 2, NErrReal: 2, ErrRateReal: m.F(2.0 / 89.0)},
+				Chan:  &m.ChanStat{N: 88, Err: 1, Client: 1, Eff: 1, Rate: 1.0 / 88.0},
+			},
+		}
+	}
+
+	t.Run("live_shape_blocks_recovery_0_4_to_0_3976", func(t *testing.T) {
+		st := trust.Step(cfg, []int{67}, live(), nil, map[int]float64{67: 0.4}, gap)[67]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=(0.022-0.02)/0.2=0.01; Update takes the down branch because sev>0:
+		// 0.4*(1-0.6*0.01)=0.3976. A clean window would have recovered instead.
+		if st.Sev != 0.01 || st.Trust != 0.3976 {
+			t.Fatalf("trust sev=%v value=%v want 0.01 / 0.3976", st.Sev, st.Trust)
+		}
+		joined := strings.Join(st.Why, ";")
+		if !strings.Contains(joined, "1h 错误率 2.2%") || strings.Contains(joined, "10m 错误") {
+			t.Fatalf("expected only the 1h 2.2%% note, got %q", st.Why)
+		}
+	})
+
+	t.Run("clean_scoring_window_recovers_despite_chan_and_mix", func(t *testing.T) {
+		fs := live()
+		fs[67].Long = &m.Window{N: 91, Err: 0, ErrRate: m.F(0)}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 0.4}, gap)[67]
+		// 0.4 + 0.2*(2473/60/45)*min(1, 91/30) = 0.583185... -> 0.5832
+		if st.Sev != 0 || st.Trust != 0.5832 {
+			t.Fatalf("clean scoring window must recover, sev=%v value=%v want 0 / 0.5832", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("exactly_2_percent_does_not_penalize_and_recovers", func(t *testing.T) {
+		fs := live()
+		fs[67].Long = &m.Window{N: 91, Err: 2, ErrRate: m.F(0.02)}
+		st := trust.Step(cfg, []int{67}, fs, nil, map[int]float64{67: 0.4}, gap)[67]
+		// Threshold is strict greater-than 2%, so 2.0% takes the recovery branch.
+		if st.Sev != 0 || st.Trust != 0.5832 {
+			t.Fatalf("ErrRate=2.0%% must recover, sev=%v value=%v want 0 / 0.5832", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("settle_holds_20_when_n88_eff1", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{67: 3}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[67], notes)
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"定档：策略 3→20", "无渠道级错误证据", "1h 真实 88", "渠道错误 1", "去集中 1", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+
+	t.Run("strategy_already_20_has_no_settle_note", func(t *testing.T) {
+		fs := live()
+		next := map[int]int{67: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[67], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("strategy already 20 should not emit a settle note, got %q", notes)
+		}
+	})
+
+	t.Run("meeting_the_gate_allows_a_cut", func(t *testing.T) {
+		fault := m.Feats{67: {
+			Long: &m.Window{N: 91, Err: 3, ErrRate: m.F(0.1)},
+			Chan: &m.ChanStat{N: 88, Err: 3, Client: 1, Eff: 3, Rate: 0.1},
+		}}
+		next := map[int]int{67: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fault, []int{67}, nil, &notes)
+		if next[67] != 18 {
+			t.Fatalf("weight=%d want 18 after meeting 30/3/3%%; notes=%q", next[67], notes)
+		}
+		if !strings.Contains(strings.Join(notes, ";"), "达降权门槛") {
+			t.Fatalf("expected a fault-cut note, got %q", notes)
+		}
+	})
+}

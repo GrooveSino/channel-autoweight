@@ -2802,3 +2802,158 @@ func TestCasebookNearFloorTrustStillClampedAfterCleanTenMinHourStaysHigh(t *test
 		}
 	})
 }
+
+// TestCasebookMidRecoveryTrustMultipliedDownDespiteCleanTenMin locks
+// CASE-AW-037: after a clean mid-recovery, a new 1h raw rate of 3/33=9.09%
+// takes the multiplicative down branch (0.6703 -> 0.5279) even though the
+// 10m window is still clean (0/3, one empty type2). ChanStat records all 3
+// faults as client-class (N=26, Err=0) and does not meet 30/3/3%, so a
+// strategy target of 0 is settled back to 20. This locks current v5.01
+// behavior; it does not change the algorithm.
+func TestCasebookMidRecoveryTrustMultipliedDownDespiteCleanTenMin(t *testing.T) {
+	now := int64(100000)
+	var rows []m.Row
+	// 10m window (3): 2 real successes + 1 empty type2, no errors, no probes.
+	for n := 0; n < 2; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900100 + n, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900200, Ct: 0, Ut: 5})
+	// Older than 10m, still inside 60m: 4 probes + 22 user successes + 1 empty
+	// + 3 client-class errors.
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 1318, Ct: 300, Ut: 5})
+	}
+	for n := 0; n < 22; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900300 + n, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900400, Ct: 0, Ut: 5})
+	for n := 0; n < 3; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 5, Tok: 900500 + n, Sc: m.I(400)})
+	}
+
+	featCfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+	fs := features.Build(featCfg, []m.Channel{{ID: 67}}, rows, now)
+	f := fs[67]
+	if f == nil || f.Long == nil || f.Short == nil || f.Chan == nil || f.Mix == nil {
+		t.Fatalf("missing features: %+v", f)
+	}
+	if f.Long.N != 33 || f.Long.Err != 3 {
+		t.Fatalf("raw 60m n=%d err=%d want 33/3", f.Long.N, f.Long.Err)
+	}
+	rate := m.Or(f.Long.ErrRate, 0)
+	if rate != m.Round(3.0/33.0, 4) {
+		t.Fatalf("raw err rate=%v want rounded 3/33=0.0909", rate)
+	}
+	if f.Long.Empty == nil || *f.Long.Empty != 2 {
+		t.Fatalf("60m empty=%v want 2", f.Long.Empty)
+	}
+	if f.Short.N != 3 || f.Short.Err != 0 {
+		t.Fatalf("raw 10m n=%d err=%d want 3/0", f.Short.N, f.Short.Err)
+	}
+	if f.Short.Empty == nil || *f.Short.Empty != 1 {
+		t.Fatalf("10m empty=%v want 1", f.Short.Empty)
+	}
+	if f.Mix.NUser != 29 || f.Mix.NProbe != 4 || f.Mix.NErrReal != 3 {
+		t.Fatalf("mix=%+v want NUser=29 NProbe=4 NErrReal=3", f.Mix)
+	}
+	if f.Chan.N != 26 || f.Chan.Err != 0 || f.Chan.Client != 3 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+		t.Fatalf("chanstat=%+v want N=26 Err=0 Client=3 Eff=0 Rate=0", f.Chan)
+	}
+
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08).
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2614s.
+	gap := m.F(2614.0 / 60.0)
+
+	t.Run("live_shape_multiplies_0_6703_to_0_5279_despite_clean_10m", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.6703}, gap)[67]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=(0.0909-0.02)/0.2=0.3545 -> 0.354; Update takes the down branch
+		// because sev>0: 0.6703*(1-0.6*0.354)=0.52792828... -> 0.5279.
+		// The 10m empty type2 does not add a why note.
+		if st.Sev != 0.354 || st.Trust != 0.5279 {
+			t.Fatalf("trust sev=%v value=%v want 0.354 / 0.5279", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "1h 错误率 9.1%" {
+			t.Fatalf("trust why=%v want [1h 错误率 9.1%%]", st.Why)
+		}
+	})
+
+	t.Run("clean_1h_would_recover_to_0_8639", func(t *testing.T) {
+		clean := m.Feats{67: {
+			Long:  &m.Window{N: 33, Err: 0, ErrRate: m.F(0)},
+			Short: &m.Window{N: 3, Err: 0, ErrRate: m.F(0), Empty: m.I(1)},
+			Mix:   f.Mix,
+			Chan:  f.Chan,
+		}}
+		st := trust.Step(trustCfg, []int{67}, clean, nil, map[int]float64{67: 0.6703}, gap)[67]
+		// 0.6703 + 0.2*min(1, 2614/60/45)*min(1, 33/30) = 0.8639296... -> 0.8639
+		if st.Sev != 0 || st.Trust != 0.8639 {
+			t.Fatalf("clean 1h must recover, sev=%v value=%v want 0 / 0.8639", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("sibling_72_already_at_floor_stays_0_1_on_slightly_over_2pct", func(t *testing.T) {
+		// Same live 2614s gap, sanitized CC #72 shape this round: 1h 1/37=2.70%,
+		// clean 10m n=3, prev already at the 0.1 floor. sev=(0.0270-0.02)/0.2=0.035;
+		// 0.1*(1-0.6*0.035)=0.0979..., then clamps to 0.1. This must not be mixed
+		// with #67's mid-value multiplicative drop.
+		sib := m.Feats{72: {
+			Long:  &m.Window{N: 37, Err: 1, ErrRate: m.F(m.Round(1.0/37.0, 4))},
+			Short: &m.Window{N: 3, Err: 0, ErrRate: m.F(0)},
+		}}
+		st := trust.Step(trustCfg, []int{72}, sib, nil, map[int]float64{72: 0.1}, gap)[72]
+		if st.Sev != 0.035 || st.Trust != 0.1 {
+			t.Fatalf("sibling floor hold sev=%v value=%v want 0.035 / 0.1", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "1h 错误率 2.7%" {
+			t.Fatalf("trust why=%v want [1h 错误率 2.7%%]", st.Why)
+		}
+	})
+
+	t.Run("no_recovery_cap_when_n60_already_ample", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.6703}, gap)[67]
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: f.Long.N}}, map[int]float64{67: st.Trust}, []int{67})
+		if caps[67] != nil {
+			t.Fatalf("trust cap=%+v; n60=33 is not < 20 so recovery cap 3 must not be computed", caps[67])
+		}
+	})
+
+	t.Run("settle_holds_0_to_20_without_trust_cap", func(t *testing.T) {
+		next := map[int]int{67: 0}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20; strategy 0 must be settled back without a trust cap", next[67])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#67 定档：策略 0→20", "无渠道级错误证据", "1h 真实 26", "渠道错误 0", "去集中 0"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle note to contain %q, got %q", part, notes)
+			}
+		}
+		for _, part := range []string{"系统上限 3", "不执行"} {
+			if strings.Contains(joined, part) {
+				t.Fatalf("ample n60 must not mention held recovery cap %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("already_20_has_no_settle_note", func(t *testing.T) {
+		next := map[int]int{67: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[67], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("already at 20 should not emit a settle note, got %q", notes)
+		}
+	})
+}

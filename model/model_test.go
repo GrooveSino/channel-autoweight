@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +53,60 @@ func TestProbeTokenIDs(t *testing.T) {
 	}
 	if got := fmt.Sprint(c.Ints("probe_token_ids")); got != "[38 1305]" {
 		t.Errorf("probe_token_ids %s", got)
+	}
+}
+
+func idsOfChans(cs []Channel) []int {
+	out := make([]int, len(cs))
+	for i, c := range cs {
+		out[i] = c.ID
+	}
+	return out
+}
+
+// CASE-AW-030: ExcludeChans is an exact ID filter. A test-named or off-priority
+// channel stays in the set until its ID is listed in exclude_ids.
+func TestExcludeChansKeepsUnlistedTestNamedChannels(t *testing.T) {
+	chans := []Channel{
+		{ID: 2, Name: "[SWBS]-GPT-0.16", Weight: 20, Priority: 10},
+		{ID: 23, Name: "[BL]-GPT-0.13", Weight: 20, Priority: 10},
+		{ID: 26, Name: "[KRL]-GPT-0.13", Weight: 20, Priority: 10},
+		{ID: 32, Name: "[SJ]-GPT-0.13", Weight: 20, Priority: 10},
+		{ID: 73, Name: "[HL]-GPT-0.13", Weight: 20, Priority: 10},
+		{ID: 88, Name: "测试-[HL]-GPT-Pro-0.18", Weight: 5, Priority: 10},
+		{ID: 89, Name: "测试-[HL]-GPT-Ultrafast-0.20", Weight: 5, Priority: 10},
+		{ID: 90, Name: "[OTHER]-GPT", Weight: 8, Priority: 1},
+	}
+	// Ints() only accepts JSON-style []any of float64.
+	old := M{"exclude_ids": []any{28.0, 81.0, 82.0, 83.0, 85.0, 86.0, 87.0}}
+	got := ExcludeChans(old, chans)
+	if fmt.Sprint(idsOfChans(got)) != "[2 23 26 32 73 88 89 90]" {
+		t.Fatalf("unlisted test-named and off-priority channels must remain, got %v", idsOfChans(got))
+	}
+	for _, c := range got {
+		if c.ID == 88 || c.ID == 89 {
+			if !strings.HasPrefix(c.Name, "测试") {
+				t.Fatalf("test name must be preserved, not used as a filter: %+v", c)
+			}
+		}
+		if c.ID == 90 && c.Priority != 1 {
+			t.Fatalf("priority must be preserved and is not a filter: %+v", c)
+		}
+	}
+
+	now := M{"exclude_ids": []any{28.0, 81.0, 82.0, 83.0, 85.0, 86.0, 87.0, 88.0, 89.0}}
+	got = ExcludeChans(now, chans)
+	if fmt.Sprint(idsOfChans(got)) != "[2 23 26 32 73 90]" {
+		t.Fatalf("listed 88/89 must drop, others remain, got %v", idsOfChans(got))
+	}
+
+	// IDs in exclude_ids but absent from the channel list are ignored.
+	got = ExcludeChans(M{"exclude_ids": []any{28.0, 99.0}}, []Channel{{ID: 2, Name: "a", Weight: 20, Priority: 10}})
+	if fmt.Sprint(idsOfChans(got)) != "[2]" {
+		t.Fatalf("missing exclude id should be ignored, got %v", idsOfChans(got))
+	}
+	got = ExcludeChans(M{}, chans)
+	if fmt.Sprint(idsOfChans(got)) != "[2 23 26 32 73 88 89 90]" {
+		t.Fatalf("empty exclude keeps all, got %v", idsOfChans(got))
 	}
 }

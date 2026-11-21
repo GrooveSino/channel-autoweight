@@ -229,3 +229,21 @@ cycle及四个ordinal / 每项案例是否仍适用 / 新增或修订证据 / �
 - 相关单测通过；全包测试仍缺基准 fixture，未用真实配置补洞。待证项（trust 与 Settle 口径是否对齐、未达故障门时慢请求/HANGTAIL 是否应限幅、10m 小样本严重度、无真实用户时是否冻结 trust 回升、远程 TPS）保持候选。不在本复盘改 slow_thr、err_10m_min_n、30/3/3%、raise_clean 或生产权限。
 - 结论：已逐项复核第 13 至 16 个唯一轮。本周期新增并锁定 CASE-AW-027/028/029，均为现有 v5.01 行为的回归与解释，不作为算法升级。无需要立即变更的生产规则。下一复盘点为第 20 个唯一真实轮。
 
+## ROUND-20261121-141529+0800（计入第 17 轮，失败）
+
+- 日期：2026-11-21 14:15:29（北京时间，Asia/Shanghai）；run_dir `20261121-141529+0800`；outcome=failed；applied=null。写前 recommendation set mismatch：GPT system_target 在授权 2/23/26/32/73 之外新增测试渠 #88/#89。确定未提交，无 UNCERTAIN，未扩权、未改 exclude_ids、未重试写入。只读建议中授权渠道全部 20→20。
+- 运行算法：v5.01；运行 binary SHA256 `0db48260f84ef1b93b365e023e96c4556355b595fcdc502ddfdbb5ee4c109b79`。本轮未替换 live runner，未改固定 hash。
+- 候选包：no-new-version。当时优先交接调权故障，未在本轮改仓库代码。
+- 实证：14:23 Groove 批准仅将 #88/#89 加入 GPT exclude_ids，不纳入自动写权。14:26 check-only 不计轮，不补跑 14:15 失败轮。失败轮也计实际尝试。详见随后第 18 轮与 CASE-AW-030。
+- 当前计数：本轮为截点后第 17 个唯一真实调权轮；已完成的复盘覆盖第 1–4 轮、第 5–8 轮、第 9–12 轮与第 13–16 轮。下一复盘点为第 20 轮。
+
+## ROUND-20261121-150347+0800（计入第 18 轮）
+
+- 日期：2026-11-21 15:03:47–15:03:59（北京时间，Asia/Shanghai）；run_dir `20261121-150347+0800`；outcome=verified_noop；未写入生产权重，授权渠道全部维持 20。GPT 建议集合已恢复为 {2,23,26,32,73}，CC 仍为 {67,68,72}。
+- 运行算法：v5.01；运行 binary SHA256 `0db48260f84ef1b93b365e023e96c4556355b595fcdc502ddfdbb5ee4c109b79`。本候选不改变算法行为、不部署、不替换固定二进制。
+- 候选包：ci-casebook-20261121.18。
+- 候选：CASE-AW-030（第 17 轮 GPT 将未列入 exclude_ids、名称带「测试」的 #88/#89 纳入 system_target，写前集合校验失败关闭；取渠 SQL 只按 status=1 与 model_like 范围，不按名称/group/priority 过滤；ExcludeChans 只按精确 ID 剔除。第 18 轮在 14:23 已将 88/89 列入 exclude_ids 之后集合恢复，权重维持）。并复核 CASE-AW-011（本事件是渠道集合不匹配，不是 71 键不匹配；71 键仍一致）与 CASE-AW-017（本轮 CC #67 评分窗 3/28=10.7% 进入 trust，ChanStat 渠道错误 0、去集中 0，定档 16→20，不能把 10.7% 写成已降权）。
+- 实际修改：新增 CASE-AW-030 及合成回归 `TestExcludeChansKeepsUnlistedTestNamedChannels`、`TestChannelsSQLScopeIsStatusAndModelNotPriorityNameOrGroup`。为 CASE-AW-011 补本轮脱敏证据。未改 Channels/ExcludeChans 实现、原运行树配置、runner 或生产权限。
+- 实证：仅用脱敏渠道名单与 SQL 形状，不把监测窗去重样本代入，不连生产。不能把「测试」前缀或非 default 组写成算法已排除，也不能把第 17 轮失败或 14:26 check-only 写成已写回。本轮不是四轮复盘点（下一复盘为第 20 轮）。
+- 测试结果与精确 commit 在提交后写入外部 learning/state.json 的本轮 annotate，避免文档自引用 hash。
+- 当前计数：本轮为截点后第 18 个唯一真实调权轮；已完成的复盘覆盖第 1–4 轮、第 5–8 轮、第 9–12 轮与第 13–16 轮。下一复盘点为第 20 轮。Mac 若离线，文档仅本机与仓库分支留存。

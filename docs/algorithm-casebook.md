@@ -139,6 +139,9 @@
 - 状态/关联：guard-external；原runner、config、固定hash完全不动。
 - 补充证据：2026-11-21 12:15（北京时间）Groove 直接授权将 weight-only 允许名单由 61 个精确 abilities 复合键扩至 71 个，现行名单与 SHA256 由外部 writer 管理，不改本仓 runner/配置/固定二进制。紧邻的 `20261121-120738+0800` 轮在写前因相对 19:53 的 61 键校验失败（生产多出 10 个新键），确定未提交，无 UNCERTAIN，未自动扩权。同日 12:20 check-only 与本轮 `20261121-125003+0800` 的 snapshot/readback 均为 71 个唯一键，且与现行名单完全一致；本轮 applied=false，apply.sql 无 UPDATE。不得把这次范围更新写成算法仓已改写回实现，也不得把失败轮补跑成已写入。S3。
 
+- 补充证据：2026-11-21 14:15:29 轮 `20261121-141529+0800` 再次失败关闭，但这次是渠道建议集合不匹配（GPT system_target 新增 #88/#89），不是 abilities 键集合。确定未提交，无 UNCERTAIN，未扩写权。14:23 仅批准把二者列入 GPT exclude_ids；14:26 check-only 与第 18 轮 `20261121-150347+0800` 的 71 键仍与现行名单一致，applied=false。详见 CASE-AW-030。不得把渠道集合失败写成键集合失败，也不得把 check-only 或排除配置变更写成已写回。S3。
+
+
 ## CASE-AW-012：缺TTFT与远程指标未接
 
 - 场景/证据：S1/S2静态；`probe/remote_site.go:54,60,97–98`只允许旧渠道集合，#73不在；未读取任何真实凭据。
@@ -346,6 +349,14 @@
 - 测试/验收：`decide/casebook_test.go:TestCasebookAmpleSlowRateCutsTrustButSettleHolds`。合成 #72 评分窗 N=127、SlowRate=0.2205：trust 由 0.9797 降至 0.8034 且注记「1h 慢请求 22%」；干净 ChanStat 不阻止处罚；1h SlowRate≤15% 时即使 10m 为 34.48% 也不走慢请求信任路径；策略 0→20 写「1h 真实 123、渠道错误 0、去集中 0」，已是 20 时无定档注记。Decide 回归用公开示例的延迟权重与 empty_weight=2、以及现场 floor=0.85：#68/#72 均够格，#67 不够格，顺序 68、72、67，raw_score 已是 #68 领先，信任乘子只再压低 #72，无「不得排第一」注记，两人（加 #67）权重均维持 20。HANGTAIL 由 `diag/diag_test.go:TestHangTailFlagsAmpleSlowWindowStillRecordsOnly` 锁定 8/127、最长 629s、系统给 20、只记录。只用虚构 token，无真实日志。
 - 状态/关联：本次新增并离线执行；锁定现有 v5.01 行为，不改变 slow_thr、slow_sev、信任 floor、30/3/3% 合取或生产运行版本。关联本轮候选提交。
 
+## CASE-AW-030：名称带「测试」的新启用渠道只要未列入 exclude_ids，就会进入 system_target；写前集合校验失败则确定不提交
+
+- 场景/日期/证据：2026-11-21 14:15:29 轮 `20261121-141529+0800`（截点后第 17 个计入轮，failed，确定未提交）。GPT 只读建议的 system_target 在授权的 {2,23,26,32,73} 之外新增 #88、#89。二者名称以「测试」开头（测试-[HL]-GPT-Pro-0.18 / 测试-[HL]-GPT-Ultrafast-0.20），当时 status=1、weight=5、priority=10，所在 group=gpt-tier-eval（不是 default）。算法将二者标为 newcomers，目标维持 5（thin，1h 真实用户 0，各 1 条探针；newcomer cap=6）。外部 weight-only 入口在写前因 recommendation set mismatch 拒绝，早于备份/apply.sql/UNCERTAIN，无 UPDATE。CC 集合仍为 {67,68,72}。当时 GPT 原配置 exclude_ids 为 [28,81,82,83,85,86,87]，尚未包含 88/89。同日 14:23 Groove 批准仅将 88/89 加入 exclude_ids，不纳入自动写权；14:26 check-only 不计轮、未补跑第 17 轮。随后 15:03:47 轮 `20261121-150347+0800`（第 18 轮，verified_noop）的 GPT system_target 精确回到 {2,23,26,32,73}，CC 仍为 {67,68,72}，授权渠道全部 20→20，未制造 UPDATE。S3。
+- 理想应对（设计目标）：测试前缀、非授权组或未在精确写权名单中的新渠道，不应自动进入 system_target，以免阻断本已可维持的授权渠写回。是否按名称前缀、「测试」字样、group 或允许名单过滤，需单独授权并回归后才能考虑切换运行版本，不是已批准的新取渠规则。本事件的已批准处理是把 88/89 写入 GPT 原配置 exclude_ids。
+- 当前真实处理/依据：`fetch/psql.go` 的 `Channels` 只取 `status=1` 且存在匹配 `model_like`（默认 gpt-%）且非 `exclude_model_like` 的能力行；配置中的 `priority` 写入 `Psql.Priority`，用于事后核验，不进入这条取渠 SQL 的 WHERE。`Channel` 结构没有 group 字段，名称「测试」前缀也不参与过滤。随后 `core/round.go` 只调用 `model.ExcludeChans`（`model/config.go`），按 exclude_ids 精确剔除，缺席 ID 忽略。因此 14:15 时 88/89 进入决定集与 system_target。外部 writer（`run_round.py` / `weight_sql.py`，不在本仓）在建议集合与授权集合不等时失败关闭；本仓 `apply/apply.go` 不能拿来替换该入口。14:23 之后 exclude_ids 含 88/89，二者在决定前被丢掉，第 18 轮集合恢复。
+- 差距：易把「priority=10 才纳入」写成取渠 SQL 已按 priority 过滤，或把测试名前缀/非 default 组写成算法已排除。实际上当前实现在取渠层不做这三项过滤。也不可把第 17 轮失败写成已提交，或把 14:26 check-only 计成调权轮。按名称/组/允许名单过滤仅作候选设计，本次不改 Channels SQL、ExcludeChans 或生产运行版本。
+- 测试/验收：`model/model_test.go:TestExcludeChansKeepsUnlistedTestNamedChannels` 锁定：exclude_ids 为 [28,81,82,83,85,86,87] 时，名称以「测试」开头的 #88/#89 以及 priority≠10 的未列出渠道仍保留；加入 88/89 后二者被剔除、其余保留；名单中不存在的 ID 被忽略。`fetch/fetch_test.go:TestChannelsSQLScopeIsStatusAndModelNotPriorityNameOrGroup` 锁定：Channels SQL 含 status=1 与 model_like 范围，WHERE 不含 priority/name/group 过滤；数据库返回的测试名前缀渠道在这一层原样保留。只用虚构渠道行，无真实日志、不连生产。
+- 状态/关联：本次新增并离线执行；锁定现有 v5.01 行为，不改变取渠范围或生产运行版本。关联本轮候选提交。对照 CASE-AW-011：第 14 轮是 abilities 精确键集合不匹配而失败关闭，本条是渠道建议集合不匹配；都是外部 writer 的失败关闭，不是本仓 apply。
 ## 后续记录规则
 
 每轮列候选、是否修改、离线测试、关联commit、候选版本、实际运行版本；无安全改进则明确“未修改及原因”。每4个唯一真实run_dir复核全部案例状态与新证据，无新增也写结论；不强迫改算法。历史7轮只是种子，不占第1–4轮计数。详见工作约定与外部state，不能因切分支重置。

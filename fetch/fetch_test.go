@@ -105,3 +105,45 @@ func TestVerifyChecks(t *testing.T) {
 		t.Error("short row must fail")
 	}
 }
+
+// CASE-AW-030: Channels() is scoped by status=1 and model_like only.
+// Configured priority, channel name, and group never enter the WHERE clause;
+// a test-named newcomer that the database returns is kept at this layer.
+func TestChannelsSQLScopeIsStatusAndModelNotPriorityNameOrGroup(t *testing.T) {
+	var got string
+	p := NewPsql(m.M{"model_like": "gpt-%", "exclude_model_like": "gpt-image-%", "priority": 10})
+	if p.Priority != 10 {
+		t.Fatalf("priority field %d", p.Priority)
+	}
+	p.Run = func(_ context.Context, argv []string, stdin string) (string, error) {
+		got = stdin
+		return "BEGIN\n2|[SWBS]-GPT-0.16|20|10\n23|[BL]-GPT-0.13|20|10\n88|测试-[HL]-GPT-Pro-0.18|5|10\n89|测试-[HL]-GPT-Ultrafast-0.20|5|10\nROLLBACK\n", nil
+	}
+	cs, err := p.Channels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 4 || cs[2].ID != 88 || cs[3].ID != 89 || !strings.HasPrefix(cs[2].Name, "测试") || cs[2].Weight != 5 || cs[2].Priority != 10 {
+		t.Fatalf("test-named newcomers must pass through Channels(): %+v", cs)
+	}
+	if !strings.HasPrefix(got, "BEGIN READ ONLY;\n") || !strings.HasSuffix(got, "ROLLBACK;\n") {
+		t.Fatalf("not wrapped: %q", got)
+	}
+	if !strings.Contains(got, "c.status=1") || !strings.Contains(got, "a.model like 'gpt-%'") || !strings.Contains(got, "a.model not like 'gpt-image-%'") {
+		t.Fatalf("missing status/model scope: %q", got)
+	}
+	where := got
+	if i := strings.Index(strings.ToLower(got), " where "); i >= 0 {
+		where = got[i:]
+	} else {
+		t.Fatalf("no WHERE: %q", got)
+	}
+	low := strings.ToLower(where)
+	banned := []string{"c.priority=", "c.priority =", "priority=", "c.name", "测试", "c.group", "group="}
+	banned = append(banned, string('"')+"group"+string('"'))
+	for _, b := range banned {
+		if strings.Contains(low, strings.ToLower(b)) || strings.Contains(where, b) {
+			t.Fatalf("Channels WHERE must not filter %q: %q", b, where)
+		}
+	}
+}

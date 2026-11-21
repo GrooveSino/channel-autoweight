@@ -1461,3 +1461,157 @@ func TestCasebookThinWindowClientErrorCutsTrustButSettleHolds(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-028: sanitized aggregate shape from 2026-11-21 12:50 +08:00 GPT #2/#32.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 trust 10m semantics; it does not change the algorithm.
+// A single 10m error in a non-tiny window (N>=err_10m_min_n=2) cuts trust with
+// no 2% rate threshold, even when the 1h raw rate stays <=2% and ChanStat has
+// 0 channel errors. Weight still holds because 30/3/3% is not met.
+func TestCasebookNonTinyTenMinSingleErrorCutsTrustButSettleHolds(t *testing.T) {
+	now := int64(100000)
+	build := func(shortSuccess, shortErr int, longSuccess, longErr, probes int, status *int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		for n := 0; n < shortSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 2, T: now - 30, Type: 2, Tok: 900003})
+		}
+		for n := 0; n < shortErr; n++ {
+			rows = append(rows, m.Row{Ch: 2, T: now - 30, Type: 5, Tok: 900010, Sc: status})
+		}
+		for n := 0; n < longSuccess; n++ {
+			rows = append(rows, m.Row{Ch: 2, T: now - 40*60, Type: 2, Tok: 900004})
+		}
+		for n := 0; n < longErr; n++ {
+			rows = append(rows, m.Row{Ch: 2, T: now - 40*60, Type: 5, Tok: 900011, Sc: status})
+		}
+		for n := 0; n < probes; n++ {
+			// Probes sit in the 60m window but outside the 10m window, matching
+			// the observed 10m N that did not include the 4 probes.
+			rows = append(rows, m.Row{Ch: 2, T: now - 40*60, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 2}}, rows, now)
+	}
+
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+	prev := 1.0
+
+	t.Run("ten_min_1_of_56_cuts_trust_while_1h_stays_under_2pct", func(t *testing.T) {
+		// GPT #2 this round: 10m 1/56, 60m 2/277, mix 273 user + 4 probes,
+		// ChanStat N=271 Client=2 Err=0. 1h raw 2/277=0.72% is below 2%.
+		fs := build(55, 1, 216, 1, 4, m.I(400))
+		f := fs[2]
+		if f == nil || f.Long == nil || f.Short == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Short.N != 56 || f.Short.Err != 1 {
+			t.Fatalf("10m window n=%d err=%d want 56/1", f.Short.N, f.Short.Err)
+		}
+		if f.Long.N != 277 || f.Long.Err != 2 {
+			t.Fatalf("1h window n=%d err=%d want 277/2", f.Long.N, f.Long.Err)
+		}
+		if m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h err rate=%v should stay at or under 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		if f.Chan.N != 271 || f.Chan.Err != 0 || f.Chan.Client != 2 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=271 Err=0 Client=2 Eff=0 Rate=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: prev}, nil)[2]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0.089 || st.Trust != 0.9466 {
+			t.Fatalf("trust sev=%v value=%v want 0.089 / 0.9466", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "10m 错误 1/56" {
+			t.Fatalf("trust why=%v want [10m 错误 1/56]", st.Why)
+		}
+
+		next := map[int]int{2: 3}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20 after 3\u219220 hold", next[2])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 271") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") {
+			t.Fatalf("expected hold note with ChanStat 271/0/0, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+
+	t.Run("ten_min_1_of_63_same_rule", func(t *testing.T) {
+		// GPT #32 this round: 10m 1/63, 60m 1/117, mix 113 user + 4 probes,
+		// ChanStat N=112 Client=1 Err=0. 1h raw 1/117=0.85% is below 2%.
+		fs := build(62, 1, 50, 0, 4, m.I(400))
+		f := fs[2]
+		if f.Short.N != 63 || f.Short.Err != 1 || f.Long.N != 117 || f.Long.Err != 1 {
+			t.Fatalf("windows short=%+v long=%+v want 63/1 and 117/1", f.Short, f.Long)
+		}
+		if m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h err rate=%v should stay at or under 2%%", m.Or(f.Long.ErrRate, 0))
+		}
+		if f.Chan.N != 112 || f.Chan.Err != 0 || f.Chan.Client != 1 || f.Chan.Eff != 0 {
+			t.Fatalf("chanstat=%+v want N=112 Err=0 Client=1 Eff=0", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: prev}, nil)[2]
+		if st.Sev != 0.08 || st.Trust != 0.952 || len(st.Why) != 1 || st.Why[0] != "10m 错误 1/63" {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0.08 / 0.952 / [10m 错误 1/63]", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{2: 20}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 || len(notes) != 0 {
+			t.Fatalf("already-at-20 should hold without a note, weight=%d notes=%q", next[2], notes)
+		}
+	})
+
+	t.Run("channel_500_keeps_same_10m_trust", func(t *testing.T) {
+		// Contrast: raw 10m 1/56 still drives trust, even though ChanStat now
+		// counts the two type5 rows as channel errors (still below 30/3/3%).
+		fs := build(55, 1, 216, 1, 4, m.I(500))
+		f := fs[2]
+		if f.Short.N != 56 || f.Short.Err != 1 || f.Long.N != 277 || f.Long.Err != 2 {
+			t.Fatalf("raw windows short=%+v long=%+v want 56/1 and 277/2", f.Short, f.Long)
+		}
+		if f.Chan.N != 273 || f.Chan.Err != 2 || f.Chan.Client != 0 || f.Chan.Eff != 2 {
+			t.Fatalf("chanstat=%+v want N=273 Err=2 Client=0 Eff=2", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: prev}, nil)[2]
+		if st.Sev != 0.089 || st.Trust != 0.9466 || len(st.Why) != 1 || st.Why[0] != "10m 错误 1/56" {
+			t.Fatalf("trust should still follow raw 10m 1/56, got sev=%v value=%v why=%v", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{2: 3}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{2: 20}, fs, []int{2}, nil, &notes)
+		if next[2] != 20 {
+			t.Fatalf("weight=%d want 20; Eff=2 is still below 3", next[2])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 273") || !strings.Contains(joined, "渠道错误 2") || !strings.Contains(joined, "去集中 2") {
+			t.Fatalf("expected hold note with ChanStat 273/2/2, got %q", notes)
+		}
+	})
+
+	t.Run("ten_min_n1_does_not_fire", func(t *testing.T) {
+		// err_10m_min_n defaults to 2: a lone 10m error must not emit the 10m
+		// note when 1h also stays at or under 2%.
+		fs := build(0, 1, 99, 0, 0, m.I(400))
+		f := fs[2]
+		if f.Short.N != 1 || f.Short.Err != 1 {
+			t.Fatalf("10m window n=%d err=%d want 1/1", f.Short.N, f.Short.Err)
+		}
+		if f.Long.N != 100 || f.Long.Err != 1 || m.Or(f.Long.ErrRate, 0) > 0.02 {
+			t.Fatalf("1h window=%+v want 100/1 at or under 2%%", f.Long)
+		}
+		st := trust.Step(trustCfg, []int{2}, fs, nil, map[int]float64{2: prev}, nil)[2]
+		if st.Sev != 0 || st.Trust != 1 || len(st.Why) != 0 {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0 / 1 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+}

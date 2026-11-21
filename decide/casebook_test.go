@@ -4327,3 +4327,208 @@ func TestCasebookEmptyTenMinKeepsTrustFloorWhenHourRateStaysHigh(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-044: sanitized aggregate shape from 2026-11-22 02:13 +08:00 CC #72.
+// No production log rows, request identifiers, model names or real token IDs.
+// After CASE-AW-043 held trust at the floor because the 1h raw rate stayed
+// high, the next window is clean — but only because the scoring window
+// collapsed to five probe rows (zero real user traffic). Trust then leaves
+// the floor with an uncapped 2678s interval and a 5/30 sample factor,
+// computing recovery cap 3 that Settle does not apply. This locks current
+// v5.01 Update/applyTrustCap/Settle behavior; it does not change the algorithm.
+func TestCasebookProbeOnlyCleanWindowRecoversTrustFloorUncappedInterval(t *testing.T) {
+	now := int64(100000)
+	var rows []m.Row
+	// 10m window (1): 1 probe success, no errors. N=1 is below
+	// err_10m_min_n=2, so the 10m error path is not eligible anyway.
+	rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Tok: 1318, Ct: 16, Ut: 1})
+	// Older than 10m, still inside 60m: 4 more probe successes.
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 72, T: now - 40*60, Type: 2, Tok: 1318, Ct: 16, Ut: 1})
+	}
+
+	featCfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+	fs := features.Build(featCfg, []m.Channel{{ID: 72}}, rows, now)
+	f := fs[72]
+	if f == nil || f.Long == nil || f.Short == nil || f.Mix == nil {
+		t.Fatalf("missing features: %+v", f)
+	}
+	if f.Long.N != 5 || f.Long.Err != 0 {
+		t.Fatalf("raw 60m n=%d err=%d want 5/0", f.Long.N, f.Long.Err)
+	}
+	if m.Or(f.Long.ErrRate, 0) != 0 {
+		t.Fatalf("raw err rate=%v want 0", f.Long.ErrRate)
+	}
+	if f.Short.N != 1 || f.Short.Err != 0 {
+		t.Fatalf("raw 10m n=%d err=%d want 1/0", f.Short.N, f.Short.Err)
+	}
+	if f.Mix.NUser != 0 || f.Mix.NProbe != 5 || f.Mix.NErrReal != 0 {
+		t.Fatalf("mix=%+v want NUser=0 NProbe=5 NErrReal=0", f.Mix)
+	}
+	if f.Chan != nil && f.Chan.N != 0 {
+		t.Fatalf("probe-only window must not produce real ChanStat N, got %+v", f.Chan)
+	}
+
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08).
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2678s.
+	gap := m.F(2678.0 / 60.0)
+
+	t.Run("live_shape_recovers_0_1_to_0_1331_uncapped_and_scaled_by_n60_5", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.1}, gap)[72]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=0 because 1h 0%<2% and 10m err=0 (and n=1 < err_10m_min_n=2).
+		// 0.1 + 0.2*min(1, 2678/60/45)*min(1, 5/30) = 0.1330617... -> 0.1331
+		// Time factor is 2678/2700 < 1, so this is not the 0.1667 capped value
+		// and not CASE-AW-043's 0.24 counterfactual (capped, n60=21).
+		if st.Sev != 0 || st.Trust != 0.1331 {
+			t.Fatalf("trust sev=%v value=%v want 0 / 0.1331", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 0 {
+			t.Fatalf("trust why=%v want no notes on a clean recovery", st.Why)
+		}
+	})
+
+	t.Run("capped_interval_with_same_n60_would_reach_0_1333", func(t *testing.T) {
+		// Same prev and n60=5, but a gap already at round_min. The increment
+		// would be the full sample-limited 0.2*(5/30)=0.0333..., to 0.1333.
+		// That is only 0.0002 above the live 0.1331; the large gap versus
+		// CASE-AW-043's 0.24 counterfactual is the 5/30 vs 21/30 sample
+		// factor, not the uncapped-versus-capped time factor.
+		capped := m.F(2706.0 / 60.0)
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.1}, capped)[72]
+		if st.Sev != 0 || st.Trust != 0.1333 {
+			t.Fatalf("capped contrast sev=%v value=%v want 0 / 0.1333", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("case_043_counterfactual_capped_n21_would_reach_0_24", func(t *testing.T) {
+		// The contrast written into CASE-AW-043: if that window's 1h errors
+		// had cleared, the then-capped 2706s gap and n60=21 would recover
+		// 0.1 + 0.2*1*(21/30) = 0.24. The live successor is thinner and just
+		// under 45 minutes, so it must not be rewritten as 0.24.
+		ample := m.Feats{72: {
+			Long:  &m.Window{N: 21, Err: 0, ErrRate: m.F(0)},
+			Short: &m.Window{N: 0, Err: 0},
+		}}
+		st := trust.Step(trustCfg, []int{72}, ample, nil, map[int]float64{72: 0.1}, m.F(2706.0/60.0))[72]
+		if st.Sev != 0 || st.Trust != 0.24 {
+			t.Fatalf("043 counterfactual sev=%v value=%v want 0 / 0.24", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("if_hour_rate_stayed_high_trust_would_remain_on_the_floor", func(t *testing.T) {
+		// CASE-AW-043 continuation: empty 10m plus 3/21 = 14.3% would keep
+		// multiplying 0.1 down and clamp back to t_min, even at this 2678s gap.
+		dirty := m.Feats{72: {
+			Long:  &m.Window{N: 21, Err: 3, ErrRate: m.F(3.0 / 21.0)},
+			Short: &m.Window{N: 0, Err: 0},
+		}}
+		st := trust.Step(trustCfg, []int{72}, dirty, nil, map[int]float64{72: 0.1}, gap)[72]
+		if st.Trust != 0.1 {
+			t.Fatalf("dirty 1h must keep the floor, value=%v want 0.1", st.Trust)
+		}
+		if st.Sev == 0 {
+			t.Fatalf("dirty 1h must have sev>0, got %v", st.Sev)
+		}
+	})
+
+	t.Run("sibling_67_mid_recovery_scales_0_3084_to_0_3348_without_cap", func(t *testing.T) {
+		// Same live 2678s gap, sanitized CC #67 shape this round: clean 1h
+		// n=4 (empty=2 still counted as type2 success, all probes), clean
+		// 10m n=1, prev 0.3084 after CASE-AW-043. Sample factor is 4/30,
+		// time factor is still 2678/2700: 0.3084 + 0.2*(2678/60/45)*(4/30)
+		// = 0.334849... -> 0.3348. Trust is already >= 0.3, so cap 3 is not
+		// computed even though n60=4 < 20.
+		sib := m.Feats{67: {
+			Long:  &m.Window{N: 4, Err: 0, ErrRate: m.F(0), Empty: m.I(2)},
+			Short: &m.Window{N: 1, Err: 0, ErrRate: m.F(0)},
+		}}
+		st := trust.Step(trustCfg, []int{67}, sib, nil, map[int]float64{67: 0.3084}, gap)[67]
+		if st.Sev != 0 || st.Trust != 0.3348 {
+			t.Fatalf("sibling mid recovery sev=%v value=%v want 0 / 0.3348", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 0 {
+			t.Fatalf("trust why=%v want no notes on a clean recovery", st.Why)
+		}
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: 4}}, map[int]float64{67: st.Trust}, []int{67})
+		if caps[67] != nil {
+			t.Fatalf("trust cap=%+v; trust 0.3348 is not < 0.3 so recovery cap 3 must not be computed even though n60=4 < 20", caps[67])
+		}
+	})
+
+	t.Run("sibling_68_ample_recovery_scales_0_6822_to_0_8806_without_cap", func(t *testing.T) {
+		// Same live 2678s gap, sanitized CC #68 shape: clean 1h n=56, clean
+		// 10m 0/15, prev 0.6822. n60>=30 so the sample factor is 1, but the
+		// time factor is still uncapped: 0.6822 + 0.2*(2678/60/45)*1
+		// = 0.880570... -> 0.8806. A capped interval would have reached 0.8822.
+		sib := m.Feats{68: {
+			Long:  &m.Window{N: 56, Err: 0, ErrRate: m.F(0)},
+			Short: &m.Window{N: 15, Err: 0, ErrRate: m.F(0)},
+		}}
+		st := trust.Step(trustCfg, []int{68}, sib, nil, map[int]float64{68: 0.6822}, gap)[68]
+		if st.Sev != 0 || st.Trust != 0.8806 {
+			t.Fatalf("sibling ample recovery sev=%v value=%v want 0 / 0.8806", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 0 {
+			t.Fatalf("trust why=%v want no notes on a clean recovery", st.Why)
+		}
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: 56}}, map[int]float64{68: st.Trust}, []int{68})
+		if caps[68] != nil {
+			t.Fatalf("trust cap=%+v; n60=56 is not < 20 so recovery cap 3 must not be computed", caps[68])
+		}
+	})
+
+	t.Run("recovery_cap_3_is_computed_when_scaled_trust_stays_below_0_3", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.1}, gap)[72]
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{72: {N60: f.Long.N}}, map[int]float64{72: st.Trust}, []int{72})
+		c := caps[72]
+		if c == nil || c.Cap != 3 || c.Kind != "trust" {
+			t.Fatalf("trust cap=%+v want cap=3 kind=trust", c)
+		}
+		if c.Reason != "信任 0.13 < 0.3且 1h 样本 5 < 20，恢复期限幅" {
+			t.Fatalf("trust cap reason=%q", c.Reason)
+		}
+	})
+
+	t.Run("settle_holds_3_to_20_and_mentions_unapplied_cap_with_zero_real", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.1}, gap)[72]
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{72: {N60: f.Long.N}}, map[int]float64{72: st.Trust}, []int{72})
+		next := map[int]int{72: 3}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{72: 20}, fs, []int{72}, caps, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; system cap 3 must not be applied", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#72 定档：策略 3→20", "系统上限 3", "不执行", "1h 真实 0", "渠道错误 0", "去集中 0", "0.0%", "未达降权门槛"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected held-cap note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("already_20_has_no_settle_note", func(t *testing.T) {
+		next := map[int]int{72: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[72], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("already at 20 should not emit a settle note, got %q", notes)
+		}
+	})
+}

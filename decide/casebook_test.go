@@ -3242,3 +3242,194 @@ func TestCasebookAmpleCleanWindowFullyRecoversModestTenMinTrustCut(t *testing.T)
 		}
 	})
 }
+
+// CASE-AW-040: sanitized aggregate shape from 2026-11-21 23:17 +08:00 CC #67.
+// No production log rows, request identifiers, model names or real token IDs.
+// A mid-recovery trust value is multiplied down by a thin 1h slow_rate that
+// sits exactly at slow_min_n=5, even though 3/5 scoring-window rows are empty
+// successes and 10m is empty. empty_weight=2 * empty_rate=0.6 saturates the
+// score "bad" term and zeros raw_score. Settle still holds 20 because ChanStat
+// misses 30/3/3%. This locks current v5.01 behavior; it does not change the
+// algorithm.
+func TestCasebookMidRecoveryThinSlowAndEmptyZerosScoreButSettleHolds(t *testing.T) {
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2794s.
+	gap := m.F(2794.0 / 60.0)
+	// Live #67 shape this round: scoring n=5 (2 user + 3 probes), empty=3,
+	// empty_rate=0.6, err=0, slow_rate=20%, 10m n=0. Prev trust 0.6165 after
+	// the previous clean mid-recovery step. ChanStat N=2, no channel errors.
+	live := m.Feats{67: {
+		Long: &m.Window{
+			N: 5, Err: 0, ErrRate: m.F(0),
+			Empty: m.I(3), EmptyRate: m.F(0.6),
+			P50: m.F(3), P90: m.F(64),
+			SlowRate: m.F(0.2),
+		},
+		Short: &m.Window{N: 0, Err: 0},
+		Chan:  &m.ChanStat{N: 2, Err: 0, Client: 0, Eff: 0, Rate: 0},
+		Mix:   &m.Mix{NUser: 2, NProbe: 3, NErrReal: 0},
+	}}
+
+	t.Run("live_shape_cuts_0_6165_to_0_5055_at_exact_slow_min_n", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, live, nil, map[int]float64{67: 0.6165}, gap)[67]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// n=5 is exactly slow_min_n, slow_rate 20% > 15%, so sev=slow_sev=0.3
+		// and the down branch runs: 0.6165*(1-0.6*0.3)=0.50553 -> 0.5055.
+		// The 2794s gap is ignored on a down step; empties stay type2 success
+		// (err=0) and do not block the slow path; 10m n=0 is below
+		// err_10m_min_n so it adds no short-window part.
+		if st.Sev != 0.3 || st.Trust != 0.5055 {
+			t.Fatalf("trust sev=%v value=%v want 0.3 / 0.5055", st.Sev, st.Trust)
+		}
+		if !strings.Contains(strings.Join(st.Why, ";"), "1h 慢请求 20%") {
+			t.Fatalf("trust why=%v want 1h 慢请求 20%%", st.Why)
+		}
+	})
+
+	t.Run("n4_does_not_penalize_and_recovers", func(t *testing.T) {
+		// Same prev, gap and slow_rate, but n=4 is below slow_min_n.
+		thin := m.Feats{67: {
+			Long: &m.Window{
+				N: 4, Err: 0, ErrRate: m.F(0),
+				Empty: m.I(3), EmptyRate: m.F(0.75),
+				P50: m.F(3), P90: m.F(64),
+				SlowRate: m.F(0.2),
+			},
+			Short: &m.Window{N: 0, Err: 0},
+		}}
+		st := trust.Step(trustCfg, []int{67}, thin, nil, map[int]float64{67: 0.6165}, gap)[67]
+		// 0.6165 + 0.2*min(1, 2794/60/45)*min(1, 4/30) = 0.643166... -> 0.6432
+		if st.Sev != 0 || st.Trust != 0.6432 {
+			t.Fatalf("n=4 must recover, not cut, sev=%v value=%v want 0 / 0.6432", st.Sev, st.Trust)
+		}
+		if strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("n=4 must not emit a slow-rate why, got %v", st.Why)
+		}
+	})
+
+	t.Run("slow_rate_at_15_percent_does_not_penalize", func(t *testing.T) {
+		// n=5 meets slow_min_n, but SlowRate must be strictly above 15%.
+		edge := m.Feats{67: {
+			Long: &m.Window{
+				N: 5, Err: 0, ErrRate: m.F(0),
+				Empty: m.I(3), EmptyRate: m.F(0.6),
+				P50: m.F(3), P90: m.F(64),
+				SlowRate: m.F(0.15),
+			},
+			Short: &m.Window{N: 0, Err: 0},
+		}}
+		st := trust.Step(trustCfg, []int{67}, edge, nil, map[int]float64{67: 0.6165}, gap)[67]
+		// 0.6165 + 0.2*1*(5/30) = 0.649833... -> 0.6498
+		if st.Sev != 0 || st.Trust != 0.6498 {
+			t.Fatalf("slow_rate=15%% must recover, sev=%v value=%v want 0 / 0.6498", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("empty_weight_2_times_0_6_zeros_raw_score", func(t *testing.T) {
+		w := live[67].Long
+		zero := ScoreWindow(w, 0, m.M{
+			"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0,
+			"min_n_window": 5.0, "empty_weight": 2.0, "err_exp": 2.0,
+		}, Pair{}, nil)
+		if zero == nil || *zero != 0 {
+			t.Fatalf("empty_weight 2 * empty_rate 0.6 must zero raw_score, got %v", zero)
+		}
+		positive := ScoreWindow(w, 0, m.M{
+			"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0,
+			"min_n_window": 5.0, "empty_weight": 0.0, "err_exp": 2.0,
+		}, Pair{}, nil)
+		if positive == nil || *positive == 0 {
+			t.Fatalf("empty_weight 0 must not zero the score, got %v", positive)
+		}
+	})
+
+	t.Run("empty_rate_0_4_does_not_fully_zero_score", func(t *testing.T) {
+		w := &m.Window{
+			N: 5, Err: 0, ErrRate: m.F(0),
+			Empty: m.I(2), EmptyRate: m.F(0.4),
+			P50: m.F(3), P90: m.F(64),
+			SlowRate: m.F(0.2),
+		}
+		got := ScoreWindow(w, 0, m.M{
+			"a_p50": 1.0, "b_p90": 0.0, "c_ttft": 0.0, "t_ref": 20.0,
+			"min_n_window": 5.0, "empty_weight": 2.0, "err_exp": 2.0,
+		}, Pair{}, nil)
+		// bad=min(1, 2*0.4)=0.8; (0.2)^2 * (1-0.2) * 20/(20+3) > 0
+		if got == nil || *got == 0 {
+			t.Fatalf("empty_rate 0.4 must not fully zero raw_score, got %v", got)
+		}
+	})
+
+	t.Run("no_trust_cap_because_cut_trust_stays_at_or_above_0_3", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, live, nil, map[int]float64{67: 0.6165}, gap)[67]
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: 5}}, map[int]float64{67: st.Trust}, []int{67})
+		if caps[67] != nil {
+			t.Fatalf("trust cap=%+v; trust 0.5055 is not < 0.3 so recovery cap 3 must not be computed even though n60=5 < 20", caps[67])
+		}
+	})
+
+	t.Run("settle_holds_0_to_20", func(t *testing.T) {
+		next := map[int]int{67: 0}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, live, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20 after settle hold; notes=%q", next[67], notes)
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#67 定档：策略 0→20", "无渠道级错误证据", "1h 真实 2", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault cut, got %q", notes)
+		}
+	})
+
+	t.Run("sibling_72_recovers_0_1878_to_0_2278_with_capped_gap_and_unapplied_cap", func(t *testing.T) {
+		// Same 2794s gap (time factor already 1). Live #72 this round: 10m
+		// n=0, 1h clean n=6, prev 0.1878 after CASE-AW-038's next window.
+		// 0.1878 + 0.2*1*(6/30) = 0.2278. Still < 0.3 and n60=6 < 20, so
+		// recovery cap 3 is computed but Settle does not apply it.
+		sib := m.Feats{72: {
+			Long:  &m.Window{N: 6, Err: 0, ErrRate: m.F(0), SlowRate: m.F(0), P50: m.F(5), P90: m.F(10)},
+			Short: &m.Window{N: 0, Err: 0},
+			Chan:  &m.ChanStat{N: 3, Err: 0, Client: 0, Eff: 0, Rate: 0},
+		}}
+		st := trust.Step(trustCfg, []int{72}, sib, nil, map[int]float64{72: 0.1878}, gap)[72]
+		if st.Sev != 0 || st.Trust != 0.2278 {
+			t.Fatalf("#72 recovery sev=%v value=%v want 0 / 0.2278", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 0 {
+			t.Fatalf("#72 why=%v want no notes on a clean recovery", st.Why)
+		}
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{72: {N60: 6}}, map[int]float64{72: st.Trust}, []int{72})
+		c := caps[72]
+		if c == nil || c.Cap != 3 || c.Kind != "trust" {
+			t.Fatalf("trust cap=%+v want cap=3 kind=trust", c)
+		}
+		if c.Reason != "信任 0.23 < 0.3且 1h 样本 6 < 20，恢复期限幅" {
+			t.Fatalf("trust cap reason=%q", c.Reason)
+		}
+		next := map[int]int{72: 3}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{72: 20}, sib, []int{72}, caps, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; system cap 3 must not be applied", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#72 定档：策略 3→20", "系统上限 3", "不执行", "1h 真实 3", "渠道错误 0", "去集中 0", "0.0%", "未达降权门槛"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected held-cap note to contain %q, got %q", part, notes)
+			}
+		}
+	})
+}

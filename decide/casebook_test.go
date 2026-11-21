@@ -2198,3 +2198,144 @@ func TestCasebookCleanTenMinDoesNotLiftTrustFloorWhileHourStaysHigh(t *testing.T
 		}
 	})
 }
+
+// CASE-AW-033: the next window after CASE-AW-032. CC #67's 1h raw error rate
+// has already fallen below 2% (2/232=0.86%, all client-class in ChanStat),
+// but a non-tiny 10m window still has a single error (1/78). SeverityParts
+// takes only that 10m path (sev=(0.0128)/0.2=0.064). Because sev>0, Update
+// takes the down branch and the 0.1 floor holds; it does not recover along
+// the 2633s gap. n60=232 >= 20 so the recovery-period cap of 3 is not
+// computed. ChanStat is N=226, Err=0, Client=2, Eff=0 and does not meet
+// 30/3/3%, so a strategy target of 16 is settled back to 20; if the channel
+// is already at 20, there is no settle note. This locks current v5.01
+// behavior; it does not change the algorithm.
+func TestCasebookTenMinSingleErrorPinsTrustFloorAfterHourDropsBelow2pct(t *testing.T) {
+	now := int64(100000)
+	var rows []m.Row
+	// 10m window (78): 76 real successes, 1 empty type2, 1 client-class type5.
+	for n := 0; n < 76; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900100 + n, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900200, Ct: 0, Ut: 5})
+	rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 5, Tok: 900500, Sc: m.I(400)})
+	// Older than 10m, still inside 60m.
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 1318, Ct: 300, Ut: 5})
+	}
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900201 + n, Ct: 0, Ut: 5})
+	}
+	for n := 0; n < 145; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900300 + n, Ct: 300, Ut: 5})
+	}
+	rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 5, Tok: 900501, Sc: m.I(400)})
+
+	featCfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+	fs := features.Build(featCfg, []m.Channel{{ID: 67}}, rows, now)
+	f := fs[67]
+	if f == nil || f.Long == nil || f.Short == nil || f.Chan == nil || f.Mix == nil {
+		t.Fatalf("missing features: %+v", f)
+	}
+	if f.Long.N != 232 || f.Long.Err != 2 {
+		t.Fatalf("raw 60m n=%d err=%d want 232/2", f.Long.N, f.Long.Err)
+	}
+	rate := m.Or(f.Long.ErrRate, 0)
+	if rate != m.Round(2.0/232.0, 4) {
+		t.Fatalf("raw err rate=%v want rounded 2/232=0.0086", rate)
+	}
+	if rate >= 0.02 {
+		t.Fatalf("1h err rate=%v should stay under 2%%", rate)
+	}
+	if f.Long.Empty == nil || *f.Long.Empty != 5 {
+		t.Fatalf("60m empty=%v want 5", f.Long.Empty)
+	}
+	if f.Short.N != 78 || f.Short.Err != 1 {
+		t.Fatalf("raw 10m n=%d err=%d want 78/1", f.Short.N, f.Short.Err)
+	}
+	if f.Mix.NUser != 228 || f.Mix.NProbe != 4 || f.Mix.NErrReal != 2 {
+		t.Fatalf("mix=%+v want NUser=228 NProbe=4 NErrReal=2", f.Mix)
+	}
+	if f.Chan.N != 226 || f.Chan.Err != 0 || f.Chan.Client != 2 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+		t.Fatalf("chanstat=%+v want N=226 Err=0 Client=2 Eff=0 Rate=0", f.Chan)
+	}
+
+	// Live v5.01 trust config uses up=0.2 (code default is 0.08).
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "up": 0.2, "up_full_n": 30, "round_min": 45, "down": 0.6,
+	}}
+	// Inter-round gap is the difference of algorithm now values: 2633s.
+	gap := m.F(2633.0 / 60.0)
+
+	t.Run("live_shape_pins_floor_on_10m_1_of_78", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.1}, gap)[67]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// sev=min(1, 0.0128/0.2)=0.064; Update takes the down branch because
+		// sev>0, then clamps to the 0.1 floor.
+		if st.Sev != 0.064 || st.Trust != 0.1 {
+			t.Fatalf("trust sev=%v value=%v want 0.064 / 0.1", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "10m 错误 1/78" {
+			t.Fatalf("trust why=%v want [10m 错误 1/78]", st.Why)
+		}
+	})
+
+	t.Run("clean_10m_same_1h_would_recover_to_0_295", func(t *testing.T) {
+		// Keep the same 1h 2/232 (still under 2%) but move the only 10m error
+		// out of the short window. sev would be 0, so Update takes the up path.
+		clean := m.Feats{67: {
+			Long:  f.Long,
+			Short: &m.Window{N: 77, Err: 0, ErrRate: m.F(0)},
+			Mix:   f.Mix,
+			Chan:  f.Chan,
+		}}
+		st := trust.Step(trustCfg, []int{67}, clean, nil, map[int]float64{67: 0.1}, gap)[67]
+		// 0.1 + 0.2*min(1, 2633/60/45)*min(1, 232/30) = 0.2950
+		if st.Sev != 0 || st.Trust != 0.295 {
+			t.Fatalf("clean 10m must recover, sev=%v value=%v want 0 / 0.295", st.Sev, st.Trust)
+		}
+	})
+
+	t.Run("no_recovery_cap_when_n60_already_ample", func(t *testing.T) {
+		st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.1}, gap)[67]
+		capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: f.Long.N}}, map[int]float64{67: st.Trust}, []int{67})
+		if caps[67] != nil {
+			t.Fatalf("trust cap=%+v; n60=232 is not < 20 so recovery cap 3 must not be computed", caps[67])
+		}
+	})
+
+	t.Run("settle_holds_16_to_20_without_trust_cap", func(t *testing.T) {
+		next := map[int]int{67: 16}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20; strategy 16 must be settled back without a trust cap", next[67])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#67 定档：策略 16→20", "无渠道级错误证据", "1h 真实 226", "渠道错误 0", "去集中 0"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected settle note to contain %q, got %q", part, notes)
+			}
+		}
+		for _, part := range []string{"系统上限 3", "不执行"} {
+			if strings.Contains(joined, part) {
+				t.Fatalf("ample n60 must not mention held recovery cap %q, got %q", part, notes)
+			}
+		}
+	})
+
+	t.Run("already_20_has_no_settle_note", func(t *testing.T) {
+		next := map[int]int{67: 20}
+		var notes []string
+		Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, nil, &notes)
+		if next[67] != 20 {
+			t.Fatalf("weight=%d want 20; notes=%q", next[67], notes)
+		}
+		if len(notes) != 0 {
+			t.Fatalf("already at 20 should not emit a settle note, got %q", notes)
+		}
+	})
+}

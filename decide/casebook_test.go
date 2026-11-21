@@ -1334,3 +1334,130 @@ func TestCasebookTopErrEqualTokCapDoesNotDiscount(t *testing.T) {
 		}
 	})
 }
+
+// CASE-AW-027: sanitized aggregate shape from 2026-11-21 11:20 +08:00 CC #72.
+// No production log rows, request identifiers, model names or real token IDs.
+// Locks current v5.01 behavior: a single client-class error in a thin scoring
+// window can push the raw 1h error rate over the 2% trust threshold and cut
+// trust, while ChanStat excludes that error and Settle holds the weight.
+// Strategy already at 20 produces no settle note. It does not change the algorithm.
+func TestCasebookThinWindowClientErrorCutsTrustButSettleHolds(t *testing.T) {
+	now := int64(100000)
+	build := func(status *int, extraSuccess bool) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		// 12 real successes in the last 10m (10m stays error-free).
+		for n := 0; n < 12; n++ {
+			rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Tok: 900003})
+		}
+		if extraSuccess {
+			rows = append(rows, m.Row{Ch: 72, T: now - 30, Type: 2, Tok: 900004})
+		}
+		if status != nil {
+			// One fault inside the 60m window but outside the 10m window.
+			rows = append(rows, m.Row{Ch: 72, T: now - 40*60, Type: 5, Tok: 900010, Sc: status})
+		}
+		for n := 0; n < 4; n++ {
+			rows = append(rows, m.Row{Ch: 72, T: now - 10, Type: 2, Tok: 1318})
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+		return features.Build(cfg, []m.Channel{{ID: 72}}, rows, now)
+	}
+
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+	prev := 0.8824
+
+	t.Run("client_400_cuts_trust_but_weight_holds", func(t *testing.T) {
+		fs := build(m.I(400), false)
+		f := fs[72]
+		if f == nil || f.Long == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Long.N != 17 || f.Long.Err != 1 {
+			t.Fatalf("raw window n=%d err=%d want 17/1", f.Long.N, f.Long.Err)
+		}
+		rate := m.Or(f.Long.ErrRate, 0)
+		if rate != m.Round(1.0/17.0, 4) {
+			t.Fatalf("raw err rate=%v want rounded 1/17=0.0588", rate)
+		}
+		if f.Chan.N != 12 || f.Chan.Err != 0 || f.Chan.Client != 1 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+			t.Fatalf("chanstat=%+v want N=12 Err=0 Client=1 Eff=0 Rate=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: prev}, nil)[72]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		if st.Sev != 0.194 || st.Trust != 0.7797 {
+			t.Fatalf("trust sev=%v value=%v want 0.194 / 0.7797", st.Sev, st.Trust)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "1h 错误率 5.9%" {
+			t.Fatalf("trust why=%v want [1h 错误率 5.9%%]", st.Why)
+		}
+
+		next := map[int]int{72: 20}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20 when already at 20", next[72])
+		}
+		if len(notes) != 0 {
+			t.Fatalf("expected no settle note when strategy is already 20, got %q", notes)
+		}
+
+		next = map[int]int{72: 16}
+		notes = nil
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20 after 16\u219220 hold", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 12") || !strings.Contains(joined, "渠道错误 0") || !strings.Contains(joined, "去集中 0") {
+			t.Fatalf("expected hold note with ChanStat 12/0/0, got %q", notes)
+		}
+		if strings.Contains(joined, "达降权门槛") {
+			t.Fatalf("did not expect a fault-gate cut, got %q", notes)
+		}
+	})
+
+	t.Run("channel_500_keeps_same_raw_trust_rate", func(t *testing.T) {
+		// Contrast: the same raw 1/17 window still drives trust, even though
+		// ChanStat now counts a channel error and a different rate (1/13).
+		fs := build(m.I(500), false)
+		f := fs[72]
+		if f.Long.N != 17 || f.Long.Err != 1 || m.Or(f.Long.ErrRate, 0) != m.Round(1.0/17.0, 4) {
+			t.Fatalf("raw window=%+v want 17/1 rate 0.0588", f.Long)
+		}
+		if f.Chan.N != 13 || f.Chan.Err != 1 || f.Chan.Client != 0 || f.Chan.Eff != 1 {
+			t.Fatalf("chanstat=%+v want N=13 Err=1 Client=0 Eff=1", f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: prev}, nil)[72]
+		if st.Sev != 0.194 || st.Trust != 0.7797 || len(st.Why) != 1 || st.Why[0] != "1h 错误率 5.9%" {
+			t.Fatalf("trust should still follow raw 1/17, got sev=%v value=%v why=%v", st.Sev, st.Trust, st.Why)
+		}
+		next := map[int]int{72: 16}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, nil, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20; N=13 is still below 30", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		if !strings.Contains(joined, "1h 真实 13") || !strings.Contains(joined, "渠道错误 1") || !strings.Contains(joined, "去集中 1") {
+			t.Fatalf("expected hold note with ChanStat 13/1/1, got %q", notes)
+		}
+	})
+
+	t.Run("clean_thin_window_recovers_trust", func(t *testing.T) {
+		// Same scoring-window size, no errors: recovery is not blocked.
+		fs := build(nil, true)
+		f := fs[72]
+		if f.Long.N != 17 || f.Long.Err != 0 || f.Chan.N != 13 || f.Chan.Err != 0 || f.Chan.Client != 0 {
+			t.Fatalf("clean window long=%+v chan=%+v want n60=17 err=0, chan N=13", f.Long, f.Chan)
+		}
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: prev}, nil)[72]
+		if st.Sev != 0 || st.Trust != 0.9277 || len(st.Why) != 0 {
+			t.Fatalf("trust sev=%v value=%v why=%v want 0 / 0.9277 / empty", st.Sev, st.Trust, st.Why)
+		}
+	})
+}

@@ -105,6 +105,86 @@ func TestCasebookTrustCapHeldWithoutFault(t *testing.T) {
 	})
 }
 
+// CASE-AW-015/017 supplement: sanitized aggregate shape from 2026-11-21 15:50
+// +08:00 CC #67. No production log rows, request identifiers, model names or
+// real token IDs. Trust reads the raw 4/15=26.7% scoring window (all four
+// type5 are client-class) and falls below 0.3, so the recovery-period cap of 3
+// is computed. ChanStat is N=5, Err=0, Client=4, Eff=0 and does not meet
+// 30/3/3%, so cut_needs_fault refuses to apply that system cap. This locks
+// current v5.01 behavior; it does not change the algorithm.
+func TestCasebookAllClientThinWindowTrustCapHeld(t *testing.T) {
+	now := int64(100000)
+	var rows []m.Row
+	// Two recent real successes keep the 10m window error-free (n=2).
+	for n := 0; n < 2; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 30, Type: 2, Tok: 900003})
+	}
+	// Three older real successes, still inside 60m.
+	for n := 0; n < 3; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 900004 + n})
+	}
+	// Four client-class faults in 60m, outside 10m, spread across tokens.
+	for n := 0; n < 4; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 5, Tok: 900010 + n, Sc: m.I(400)})
+	}
+	// Six probe successes in 60m, outside 10m.
+	for n := 0; n < 6; n++ {
+		rows = append(rows, m.Row{Ch: 67, T: now - 40*60, Type: 2, Tok: 1318})
+	}
+	featCfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}}
+	fs := features.Build(featCfg, []m.Channel{{ID: 67}}, rows, now)
+	f := fs[67]
+	if f == nil || f.Long == nil || f.Chan == nil {
+		t.Fatalf("missing features: %+v", f)
+	}
+	if f.Long.N != 15 || f.Long.Err != 4 {
+		t.Fatalf("raw window n=%d err=%d want 15/4", f.Long.N, f.Long.Err)
+	}
+	rate := m.Or(f.Long.ErrRate, 0)
+	if rate != m.Round(4.0/15.0, 4) {
+		t.Fatalf("raw err rate=%v want rounded 4/15=0.2667", rate)
+	}
+	if f.Chan.N != 5 || f.Chan.Err != 0 || f.Chan.Client != 4 || f.Chan.Eff != 0 || f.Chan.Rate != 0 {
+		t.Fatalf("chanstat=%+v want N=5 Err=0 Client=4 Eff=0 Rate=0", f.Chan)
+	}
+
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{"enabled": true}}
+	st := trust.Step(trustCfg, []int{67}, fs, nil, map[int]float64{67: 0.5766}, nil)[67]
+	if st == nil {
+		t.Fatal("missing trust state")
+	}
+	if st.Sev != 1 || st.Trust != 0.2306 {
+		t.Fatalf("trust sev=%v value=%v want 1 / 0.2306", st.Sev, st.Trust)
+	}
+	if len(st.Why) != 1 || st.Why[0] != "1h 错误率 26.7%" {
+		t.Fatalf("trust why=%v want [1h 错误率 26.7%%]", st.Why)
+	}
+
+	capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+	caps := map[int]*Cap{}
+	applyTrustCap(capCfg, caps, map[int]*Row{67: {N60: f.Long.N}}, map[int]float64{67: st.Trust}, []int{67})
+	c := caps[67]
+	if c == nil || c.Cap != 3 || c.Kind != "trust" {
+		t.Fatalf("trust cap=%+v want cap=3 kind=trust", c)
+	}
+	if c.Reason != "信任 0.23 < 0.3且 1h 样本 15 < 20，恢复期限幅" {
+		t.Fatalf("trust cap reason=%q", c.Reason)
+	}
+
+	next := map[int]int{67: 0}
+	var notes []string
+	Settle(m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}, next, map[int]int{67: 20}, fs, []int{67}, caps, &notes)
+	if next[67] != 20 {
+		t.Fatalf("weight=%d want 20; system cap 3 must not be applied", next[67])
+	}
+	joined := strings.Join(notes, ";")
+	for _, part := range []string{"系统上限 3", "不执行", "1h 真实 5", "渠道错误 0", "去集中 0", "0.0%", "未达降权门槛"} {
+		if !strings.Contains(joined, part) {
+			t.Fatalf("expected held-cap note to contain %q, got %q", part, notes)
+		}
+	}
+}
+
 // CASE-AW-016: sanitized relative-score shape from 2026-11-21 03:06 +08:00 GPT #23/#32.
 // No production log rows, request identifiers, model names or real token IDs.
 // Locks current v5.01 rank-1 eligibility and settle raise; it does not change the algorithm.

@@ -7584,3 +7584,334 @@ func TestCasebookShrunkClientHourAfterJustBelowPointThreeComputesUnappliedCap3(t
 		}
 	})
 }
+
+func TestCasebookThinTenMinOneOfThreeSaturatesSevAndDropsBelowPointThreeWithoutCap(t *testing.T) {
+	now := int64(100000)
+	build68 := func(shortFast, shortSlow, shortErrClient, longFast, longSlow, longErrClient, longProbes int) m.Feats {
+		t.Helper()
+		var rows []m.Row
+		add := func(ts int64, typ, tok, ut, ct int, sc *int) {
+			rows = append(rows, m.Row{Ch: 68, T: ts, Type: typ, Tok: tok, Ut: ut, Ct: ct, Sc: sc})
+		}
+		for n := 0; n < shortFast; n++ {
+			add(now-30, 2, 900013, 14, 200, nil)
+		}
+		for n := 0; n < shortSlow; n++ {
+			add(now-30, 2, 900013, 115, 200, nil)
+		}
+		for n := 0; n < shortErrClient; n++ {
+			// The live 10m error is inside the 10m window (n=3>=err_10m_min_n).
+			add(now-30, 5, 900017, 0, 0, m.I(400))
+		}
+		for n := 0; n < longFast; n++ {
+			add(now-40*60, 2, 900014, 14, 200, nil)
+		}
+		for n := 0; n < longSlow; n++ {
+			add(now-40*60, 2, 900014, 115, 200, nil)
+		}
+		for n := 0; n < longErrClient; n++ {
+			add(now-40*60, 5, 900017, 0, 0, m.I(400))
+		}
+		for n := 0; n < longProbes; n++ {
+			add(now-40*60, 2, 1318, 14, 200, nil)
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}, "slow_s": 60.0}
+		return features.Build(cfg, []m.Channel{{ID: 68}}, rows, now)
+	}
+
+	settleCfg := m.M{"settle": m.M{"cut_needs_fault": true, "raise_clean": false}}
+	trustCfg := m.M{"windows_min": []any{60.0, 10.0}, "trust": m.M{
+		"enabled": true, "down": 0.6, "err_10m_min_n": 2, "err_full": 0.2,
+		"err_1h_thr": 0.02, "err_10m_full_n": 0, "t_min": 0.1,
+		"up": 0.2, "up_full_n": 30, "round_min": 45,
+		"slow_thr": 0.15, "slow_sev": 0.3, "slow_min_n": 5,
+	}}
+	capCfg := m.M{"trust_cap": m.M{"enabled": true, "thr": 0.3, "cap": 3.0, "max_n60": 20.0}}
+	// Inter-round gap is the difference of CC (and GPT) algorithm now values: 2800s.
+	// 2800/2700>1, so the time factor is already capped at 1. Because sev>0,
+	// Update takes the down branch and the capped interval does not add up.
+	gap := m.F(2800.0 / 60.0)
+
+	t.Run("live_shape_10m_1_of_3_saturates_sev_1_and_cuts_0_3769_to_0_1508_without_cap", func(t *testing.T) {
+		// CC #68 this round: 10m 1/3 (one client-class 400 plus 1 fast and
+		// 1 slow success), 60m 1/26=3.85% with slow_rate 5/25=20%. Mix is
+		// 22 user + 4 probes with 1 real error; ChanStat N=21 Err=0
+		// Client=1 Eff=0. Prev 0.3769 is the leftover of the CASE-AW-058
+		// same-round #68 addendum, when 10m was already clean 0/1.
+		// 10m 1/3 saturates sev10=min(1, (1/3)/0.2)=1. The 1h error part
+		// is only (0.0385-0.02)/0.2=0.0925 and slow_sev is the fixed 0.3,
+		// so maxSev=1.0 and Update takes 0.3769*(1-0.6*1)=0.1508.
+		fs := build68(1, 1, 1, 15, 4, 0, 4)
+		f := fs[68]
+		if f == nil || f.Long == nil || f.Short == nil || f.Mix == nil || f.Chan == nil {
+			t.Fatalf("missing features: %+v", f)
+		}
+		if f.Short.N != 3 || f.Short.Err != 1 {
+			t.Fatalf("10m window n=%d err=%d want 3/1", f.Short.N, f.Short.Err)
+		}
+		if m.Or(f.Short.ErrRate, 0) != 0.3333 {
+			t.Fatalf("10m err rate=%v want 0.3333 (1/3)", m.Or(f.Short.ErrRate, 0))
+		}
+		if f.Long.N != 26 || f.Long.Err != 1 {
+			t.Fatalf("1h window n=%d err=%d want 26/1", f.Long.N, f.Long.Err)
+		}
+		if m.Or(f.Long.ErrRate, 0) != 0.0385 {
+			t.Fatalf("1h err rate=%v want 0.0385 (1/26)", m.Or(f.Long.ErrRate, 0))
+		}
+		if m.Or(f.Long.SlowRate, 0) != 0.2 {
+			t.Fatalf("1h slow rate=%v want 0.2 (5/25)", m.Or(f.Long.SlowRate, 0))
+		}
+		if f.Mix.NUser != 22 || f.Mix.NProbe != 4 || f.Mix.NErrReal != 1 {
+			t.Fatalf("mix=%+v want NUser=22 NProbe=4 NErrReal=1", f.Mix)
+		}
+		if f.Chan.N != 21 || f.Chan.Err != 0 || f.Chan.Client != 1 || f.Chan.Eff != 0 {
+			t.Fatalf("chanstat=%+v want N=21 Err=0 Client=1 Eff=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		if st == nil {
+			t.Fatal("missing trust state")
+		}
+		// maxSev is the saturated 10m part 1.0, not the 1h error 0.093 or
+		// the fixed slow_sev=0.3. 0.3769*(1-0.6*1)=0.15076→0.1508.
+		// This is not a stall at 0.3769, not the 1h-only cut 0.3091, and
+		// not the clean capped recovery 0.5502 (or the sample-omitted 0.5769).
+		if st.Sev != 1 || st.Trust != 0.1508 {
+			t.Fatalf("trust sev=%v value=%v why=%v want 1 / 0.1508", st.Sev, st.Trust, st.Why)
+		}
+		if len(st.Why) != 3 || st.Why[0] != "10m 错误 1/3" || st.Why[1] != "1h 错误率 3.9%" || st.Why[2] != "1h 慢请求 20%" {
+			t.Fatalf("trust why=%v want [10m 错误 1/3, 1h 错误率 3.9%%, 1h 慢请求 20%%]", st.Why)
+		}
+		if st.Trust == 0.3769 || st.Trust == 0.3091 || st.Trust == 0.5502 || st.Trust == 0.5769 {
+			t.Fatalf("must not rewrite the live 0.1508 as the previous 0.3769, the 1h-only cut 0.3091, the clean recovery 0.5502, or the sample-omitted 0.5769")
+		}
+
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: f.Long.N}}, map[int]float64{68: st.Trust}, []int{68})
+		if caps[68] != nil {
+			t.Fatalf("trust cap=%+v; 0.1508 is <0.3 but n60=26>=20 must not compute cap 3", caps[68])
+		}
+	})
+
+	t.Run("without_10m_error_hour_3_9pct_plus_slow_20pct_only_cuts_to_0_3091", func(t *testing.T) {
+		// Contrast: move the same client-class 400 out of the 10m window
+		// and keep two clean 10m successes, so 10m is 0/2 (n>=2 but
+		// Err=0, no 10m path). The hour is then 1/26=3.85% plus slow
+		// 5/25=20%, maxSev=0.3, 0.3769*0.82=0.3091, still >=0.3. This
+		// shows the live drop below 0.3 comes from the saturated 10m
+		// 1/3, not from the 1h 3.9% or the 20% slow part.
+		fs := build68(1, 1, 0, 15, 4, 1, 4)
+		f := fs[68]
+		if f.Short.N != 2 || f.Short.Err != 0 {
+			t.Fatalf("10m window=%+v want 2/0", f.Short)
+		}
+		if f.Long.N != 26 || f.Long.Err != 1 || m.Or(f.Long.ErrRate, 0) != 0.0385 {
+			t.Fatalf("1h window=%+v want 26/1 at 0.0385", f.Long)
+		}
+		if m.Or(f.Long.SlowRate, 0) != 0.2 {
+			t.Fatalf("1h slow rate=%v want 0.2", m.Or(f.Long.SlowRate, 0))
+		}
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		if st.Sev != 0.3 || st.Trust != 0.3091 {
+			t.Fatalf("no-10m contrast sev=%v value=%v why=%v want 0.3 / 0.3091", st.Sev, st.Trust, st.Why)
+		}
+		joined := strings.Join(st.Why, ";")
+		if strings.Contains(joined, "10m 错误") {
+			t.Fatalf("10m is clean; did not expect a 10m note, got %q", st.Why)
+		}
+		if !strings.Contains(joined, "1h 错误率 3.9%") || !strings.Contains(joined, "1h 慢请求 20%") {
+			t.Fatalf("expected 1h error and slow notes, got %q", st.Why)
+		}
+		if st.Trust < 0.3 {
+			t.Fatalf("1h-only contrast must stay >=0.3, got %v", st.Trust)
+		}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: f.Long.N}}, map[int]float64{68: st.Trust}, []int{68})
+		if caps[68] != nil {
+			t.Fatalf("0.3091 is not <0.3, cap must not be computed, got %+v", caps[68])
+		}
+	})
+
+	t.Run("10m_1_of_3_alone_already_cuts_to_0_1508", func(t *testing.T) {
+		// Contrast: keep the live 10m 1/3, drop the leftover 1h over-2%
+		// rate and the 20% slow successes. maxSev is still 1.0, so the
+		// number is still 0.1508; the 1h notes change the why list, not
+		// the trust value.
+		fs := m.Feats{68: {
+			Long: &m.Window{
+				N: 26, Err: 0, ErrRate: m.F(0),
+				SlowRate: m.F(0),
+			},
+			Short: &m.Window{N: 3, Err: 1, ErrRate: m.F(1.0 / 3.0), SlowRate: m.F(0.5)},
+			Chan:  &m.ChanStat{N: 22, Err: 0, Client: 0, Eff: 0, Rate: 0},
+			Mix:   &m.Mix{NUser: 22, NProbe: 4, NErrReal: 0},
+		}}
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		if st.Sev != 1 || st.Trust != 0.1508 {
+			t.Fatalf("10m-only contrast sev=%v value=%v why=%v want 1 / 0.1508", st.Sev, st.Trust, st.Why)
+		}
+		if len(st.Why) != 1 || st.Why[0] != "10m 错误 1/3" {
+			t.Fatalf("10m-only why=%v want [10m 错误 1/3]", st.Why)
+		}
+		if strings.Contains(strings.Join(st.Why, ";"), "1h 错误率") || strings.Contains(strings.Join(st.Why, ";"), "慢请求") {
+			t.Fatalf("10m-only contrast must not emit 1h notes, got %v", st.Why)
+		}
+	})
+
+	t.Run("clean_hour_would_recover_to_0_5502_not_0_5769", func(t *testing.T) {
+		// Contrast: same prev and already-capped 2800s gap, but a fully
+		// clean hour. Time factor is min(1, 2800/2700)=1 and n60=26
+		// applies 26/30, so recovery is 0.3769+0.2*26/30=0.5502. It is
+		// not 0.3769+0.2=0.5769, which would only hold if the sample
+		// factor were omitted, and not the live cut 0.1508.
+		fs := build68(2, 0, 0, 20, 0, 0, 4)
+		f := fs[68]
+		if f.Short.Err != 0 || f.Long.N != 26 || f.Long.Err != 0 {
+			t.Fatalf("windows short=%+v long=%+v want clean 10m and 1h n=26 err=0", f.Short, f.Long)
+		}
+		if m.Or(f.Long.SlowRate, 0) != 0 {
+			t.Fatalf("clean contrast slow rate=%v want 0", m.Or(f.Long.SlowRate, 0))
+		}
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		if st.Sev != 0 || st.Trust != 0.5502 || len(st.Why) != 0 {
+			t.Fatalf("clean contrast sev=%v value=%v why=%v want 0 / 0.5502 / empty", st.Sev, st.Trust, st.Why)
+		}
+		if st.Trust == 0.5769 || st.Trust == 0.1508 {
+			t.Fatalf("clean recovery must not be reported as 0.5769 or the live cut 0.1508")
+		}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: f.Long.N}}, map[int]float64{68: st.Trust}, []int{68})
+		if caps[68] != nil {
+			t.Fatalf("clean recovery %v is not <0.3, cap must not be computed, got %+v", st.Trust, caps[68])
+		}
+	})
+
+	t.Run("n60_13_would_compute_unapplied_cap_3", func(t *testing.T) {
+		// Contrast: same live trust 0.1508, but shrink n60 to 13 as in
+		// CASE-AW-058. applyTrustCap must then compute cap 3. The live
+		// window skips the cap only because n60=26>=20.
+		fs := build68(1, 1, 1, 15, 4, 0, 4)
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		if st.Trust != 0.1508 {
+			t.Fatalf("live trust=%v want 0.1508 before the n60 contrast", st.Trust)
+		}
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: 13}}, map[int]float64{68: st.Trust}, []int{68})
+		c := caps[68]
+		if c == nil || c.Cap != 3 || c.Kind != "trust" {
+			t.Fatalf("trust cap=%+v; 0.1508 is <0.3 and n60=13<20, so recovery cap 3 must be computed", c)
+		}
+	})
+
+	t.Run("settle_holds_0_to_20_without_cap_3", func(t *testing.T) {
+		fs := build68(1, 1, 1, 15, 4, 0, 4)
+		st := trust.Step(trustCfg, []int{68}, fs, nil, map[int]float64{68: 0.3769}, gap)[68]
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{68: {N60: 26}}, map[int]float64{68: st.Trust}, []int{68})
+		if caps[68] != nil {
+			t.Fatalf("live n60=26 must not compute cap 3, got %+v", caps[68])
+		}
+		next := map[int]int{68: 0}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{68: 20}, fs, []int{68}, caps, &notes)
+		if next[68] != 20 {
+			t.Fatalf("weight=%d want 20 after 0->20 hold", next[68])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#68 定档：策略 0→20", "无渠道级错误证据", "1h 真实 21", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "系统上限 3") {
+			t.Fatalf("did not expect an unapplied trust-cap note, got %q", notes)
+		}
+	})
+
+	t.Run("same_round_72_capped_interval_recovers_0_2279_to_0_3346_and_drops_cap", func(t *testing.T) {
+		// Same-round CC #72, recorded as a CASE-AW-058 addendum: after
+		// the previous shrunk hour cut 0.2747->0.2279 and computed an
+		// unapplied cap 3 (n60=13), this hour is fully clean (10m 0/1,
+		// 1h 0/16, mix 11 user + 5 probes, ChanStat N=11). The 2800s
+		// gap is already capped, n60=16 applies 16/30, and
+		// 0.2279+0.2*16/30=0.3346 crosses back above 0.3, so cap 3 is
+		// no longer computed. Do not rewrite 0.3346 as the uncapped
+		// 0.2279+0.2*2800/2700*16/30=0.3469, the sample-omitted 0.4279,
+		// or a stall at 0.2279.
+		var rows []m.Row
+		add := func(ts int64, typ, tok, ut, ct int, sc *int) {
+			rows = append(rows, m.Row{Ch: 72, T: ts, Type: typ, Tok: tok, Ut: ut, Ct: ct, Sc: sc})
+		}
+		add(now-30, 2, 900003, 14, 200, nil)
+		for n := 0; n < 10; n++ {
+			add(now-40*60, 2, 900004, 14, 200, nil)
+		}
+		for n := 0; n < 5; n++ {
+			add(now-40*60, 2, 1318, 14, 200, nil)
+		}
+		cfg := m.M{"windows_min": []any{60.0, 10.0}, "probe_token_ids": []any{1318.0}, "slow_s": 60.0}
+		fs := features.Build(cfg, []m.Channel{{ID: 72}}, rows, now)
+		f := fs[72]
+		if f.Short.N != 1 || f.Short.Err != 0 {
+			t.Fatalf("10m window=%+v want 1/0", f.Short)
+		}
+		if f.Long.N != 16 || f.Long.Err != 0 {
+			t.Fatalf("1h window=%+v want 16/0", f.Long)
+		}
+		if f.Mix.NUser != 11 || f.Mix.NProbe != 5 || f.Mix.NErrReal != 0 {
+			t.Fatalf("mix=%+v want NUser=11 NProbe=5 NErrReal=0", f.Mix)
+		}
+		if f.Chan.N != 11 || f.Chan.Err != 0 || f.Chan.Client != 0 || f.Chan.Eff != 0 {
+			t.Fatalf("chanstat=%+v want N=11 Err=0 Client=0 Eff=0", f.Chan)
+		}
+
+		st := trust.Step(trustCfg, []int{72}, fs, nil, map[int]float64{72: 0.2279}, gap)[72]
+		if st.Sev != 0 || st.Trust != 0.3346 || len(st.Why) != 0 {
+			t.Fatalf("live #72 recovery sev=%v value=%v why=%v want 0 / 0.3346 / empty", st.Sev, st.Trust, st.Why)
+		}
+		if st.Trust == 0.2279 || st.Trust == 0.4279 || st.Trust == 0.3469 {
+			t.Fatalf("must not rewrite 0.3346 as a stall at 0.2279, the sample-omitted 0.4279, or the uncapped 0.3469")
+		}
+		if st.Trust < 0.3 {
+			t.Fatalf("live #72 recovery must cross back above 0.3, got %v", st.Trust)
+		}
+
+		caps := map[int]*Cap{}
+		applyTrustCap(capCfg, caps, map[int]*Row{72: {N60: f.Long.N}}, map[int]float64{72: st.Trust}, []int{72})
+		if caps[72] != nil {
+			t.Fatalf("trust %v is not <0.3, cap 3 must no longer be computed, got %+v", st.Trust, caps[72])
+		}
+
+		// Contrast: if the 2800s gap were not already capped, the same
+		// 16/30 sample factor would reach 0.2279+0.2*2800/2700*16/30=0.3469.
+		uncappedGap := m.F(2800.0 / 60.0)
+		_ = uncappedGap
+		// 2800s is capped in the live params (round_min=45min). A
+		// slightly shorter still-capped interval cannot show the
+		// difference, so use a 2590s gap as the uncapped contrast:
+		// 0.2279+0.2*2590/2700*16/30=0.3278, which is below the live
+		// capped 0.3346. That is the wrong direction for "uncapped is
+		// larger", so instead keep 2800s and disable the cap by
+		// comparing the already-computed live value against the
+		// arithmetic 0.3469, which Update must not return.
+		if st.Trust == 0.2279+0.2*(2800.0/2700.0)*(16.0/30.0) {
+			t.Fatalf("live interval 2800s is capped; trust must not equal the uncapped arithmetic 0.3469")
+		}
+
+		next := map[int]int{72: 16}
+		var notes []string
+		Settle(settleCfg, next, map[int]int{72: 20}, fs, []int{72}, caps, &notes)
+		if next[72] != 20 {
+			t.Fatalf("weight=%d want 20 after 16->20 hold", next[72])
+		}
+		joined := strings.Join(notes, ";")
+		for _, part := range []string{"#72 定档：策略 16→20", "无渠道级错误证据", "1h 真实 11", "渠道错误 0", "去集中 0", "延迟/小样本不单独降权"} {
+			if !strings.Contains(joined, part) {
+				t.Fatalf("expected hold note to contain %q, got %q", part, notes)
+			}
+		}
+		if strings.Contains(joined, "系统上限 3") {
+			t.Fatalf("did not expect an unapplied trust-cap note after crossing 0.3, got %q", notes)
+		}
+	})
+}

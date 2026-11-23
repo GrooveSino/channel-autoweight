@@ -112,7 +112,7 @@ func main() {
 	r, err := core.Run(env, o)
 	must(err)
 	if !*integer {
-		v, err := normalized(r.Decision.Target, env.Cfg.I("w_max", 20), r.Now)
+		v, err := normalized(r.Decision.Target, r.Old, env.Cfg.I("w_max", 20), r.Now)
 		must(err)
 		payload := map[string]any{"schema": "strength-v1", "legacy-v501": v}
 		if *scale > 0 {

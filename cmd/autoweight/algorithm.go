@@ -63,7 +63,7 @@ func reviewAlgorithm(name, dir string, compare bool, out io.Writer, scales ...in
 		if err != nil {
 			return err
 		}
-		legacy, err := normalized(old.Decision.Target, cfg.I("w_max", 20), old.Now)
+		legacy, err := normalized(old.Decision.Target, old.Old, cfg.I("w_max", 20), old.Now)
 		if err != nil {
 			return err
 		}
@@ -95,14 +95,18 @@ func reviewAlgorithm(name, dir string, compare bool, out io.Writer, scales ...in
 	return json.NewEncoder(out).Encode(result)
 }
 
-func normalized(weights map[int]int, full int, now int64) (firstpass.Result, error) {
+func normalized(weights, before map[int]int, full int, now int64) (firstpass.Result, error) {
 	r := firstpass.Result{Algorithm: "legacy-v501", Cutoff: now, Channels: map[int]*firstpass.Row{}}
 	for id, w := range weights {
 		if full <= 0 || w < 0 || w > full {
 			return r, fmt.Errorf("invalid full scale or weight #%d", id)
 		}
 		v := firstpass.Ratio(float64(w) / float64(full))
-		r.Channels[id] = &firstpass.Row{Strength: &v, Status: "target"}
+		status := "target"
+		if before[id] == w {
+			status = "hold"
+		}
+		r.Channels[id] = &firstpass.Row{Old: before[id], Strength: &v, Status: status}
 	}
 	return r, nil
 }

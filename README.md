@@ -1,5 +1,7 @@
 # channel-autoweight
 
+当前 CLI 默认输出三位小数相对强度 `target_strength`；算法选择、只读对照、整数兼容与刻度预览见 [USAGE](USAGE.md)。
+
 面向LLM API网关的Go自动权重计算器。
 
 ## 中文维护入口（2026-11-21）

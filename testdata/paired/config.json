@@ -1,0 +1,1 @@
+{"priority":10,"probe_token_ids":[9001,9002],"score":{"a_p50":1,"min_n_window":5,"t_ref":20},"settle":{"enabled":true},"strategies":{"rank":{"low_w":0,"top_w":20}},"strategy":"rank","w_max":20,"windows_min":[60,10]}

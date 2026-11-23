@@ -51,7 +51,7 @@ func TestProbeTokenIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(c.Ints("probe_token_ids")); got != "[38 1305]" {
+	if got := fmt.Sprint(c.Ints("probe_token_ids")); got != "[9001 9002]" {
 		t.Errorf("probe_token_ids %s", got)
 	}
 }

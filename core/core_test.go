@@ -1,7 +1,6 @@
 package core
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,12 +10,9 @@ import (
 	m "autoweight/model"
 )
 
-const snapDir = "../snaps/r10290831" // has a toggle disable action and capped notes
+const snapDir = "../testdata/plumbing" // synthetic legacy writer exercise, never used for live writes
 
 func env(t *testing.T) Env {
-	if _, err := os.Stat(snapDir); err != nil {
-		t.Skip("snapshot not present")
-	}
 	s, err := fetch.LoadSnapshot(snapDir)
 	if err != nil {
 		t.Fatal(err)

@@ -62,6 +62,9 @@ func GoEval(dir string, sets ...string) (*Out, *core.Result, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return EvalSnapshot(s, sets...)
+}
+func EvalSnapshot(s *fetch.Snapshot, sets ...string) (*Out, *core.Result, error) {
 	cfg, err := m.LoadConfig(s.Path(fetch.ConfigFile))
 	if err != nil {
 		return nil, nil, err

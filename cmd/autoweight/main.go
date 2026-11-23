@@ -50,7 +50,21 @@ func main() {
 	flag.StringVar(&o.Expect, "expect-system", "", "ID=W[,...] system target seen at dry-run")
 	flag.StringVar(&o.Reason, "reason", "", "reason for -override/-final")
 	live := flag.Bool("live-probe", false, "run real site probes/recheck and upstream direct tests (same calls as run.py; costs requests)")
+	algorithm := flag.String("algorithm", "legacy-v501", "legacy-v501 or first-pass-v1")
+	compare := flag.Bool("compare", false, "compare both policies on a frozen snapshot (read only)")
+	integer := flag.Bool("legacy-integer-output", false, "original legacy report format")
+	scale := flag.Int("weight-scale", 0, "preview integer scale (1..1000000), never writes")
 	flag.Parse()
+	if *scale < 0 || *scale > 1000000 || *scale > 0 && (o.Apply || o.ApplyToggle || *integer) || *integer && (*compare || *algorithm != "legacy-v501") {
+		log.Fatal("incompatible scale, algorithm or output mode")
+	}
+	if *algorithm != "legacy-v501" || *compare {
+		if o.Apply || o.ApplyToggle || *live || o.Override != "" || o.Final != "" || o.Expect != "" || o.Strategy != "" || *cfgPath != "" || (*out != "" && *out != "-") {
+			log.Fatal("algorithm review rejects writes, overrides and live/config options")
+		}
+		must(reviewAlgorithm(*algorithm, *snap, *compare, os.Stdout, *scale))
+		return
+	}
 
 	env := core.Env{Probe: core.NoProber{}}
 	var err error
@@ -97,7 +111,19 @@ func main() {
 	}
 	r, err := core.Run(env, o)
 	must(err)
-	if *asJSON {
+	if !*integer {
+		v, err := normalized(r.Decision.Target, env.Cfg.I("w_max", 20), r.Now)
+		must(err)
+		payload := map[string]any{"schema": "strength-v1", "legacy-v501": v}
+		if *scale > 0 {
+			raw := map[int]int{}
+			for id, row := range v.Channels {
+				raw[id] = row.Strength.Weight(*scale)
+			}
+			payload["preview"] = map[string]any{"scale": *scale, "integer_weights": raw, "pool_shares": nil}
+		}
+		must(json.NewEncoder(os.Stdout).Encode(payload))
+	} else if *asJSON {
 		b, _ := json.MarshalIndent(r, "", " ")
 		fmt.Println(string(b))
 	} else {

@@ -2,6 +2,8 @@ bin/
 snaps/
 data/
 config.json
+!testdata/**/config.json
+!testdata/config.json
 .env
 
 # Local-only Python learning helper artifacts

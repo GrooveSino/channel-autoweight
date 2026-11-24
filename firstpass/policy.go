@@ -24,6 +24,7 @@ type Event struct {
 type Input struct {
 	Cutoff                  int64
 	WindowSeconds, MinUsers int
+	WeightScale             int // zero keeps the legacy 20-scale input contract
 	EquivalenceGap          float64
 	Current, Caps           map[int]int
 	Fixed                   []int
@@ -52,6 +53,13 @@ func Evaluate(in Input) (Result, error) {
 		return Result{}, fmt.Errorf("explicit equivalence gap required")
 	}
 	r := Result{"first-pass-v1", in.Cutoff, map[int]*Row{}}
+	scale := in.WeightScale
+	if scale == 0 {
+		scale = 20
+	}
+	if scale < 1 || scale > 1000000 {
+		return r, fmt.Errorf("invalid weight scale")
+	}
 	if in.Cutoff <= 0 || in.WindowSeconds <= 0 || in.MinUsers < 2 || len(in.Current) == 0 {
 		return r, fmt.Errorf("missing window, preimage or independent-user minimum")
 	}
@@ -61,7 +69,7 @@ func Evaluate(in Input) (Result, error) {
 	}
 	for i, w := range in.Current {
 		cap, ok := in.Caps[i]
-		if !ok || cap < 0 || cap > 20 || w < 0 || w > 20 {
+		if !ok || cap < 0 || cap > scale || w < 0 || w > scale {
 			return r, fmt.Errorf("invalid cap/preimage #%d", i)
 		}
 		r.Channels[i] = &Row{Old: w, Status: "abstain"}
@@ -228,11 +236,11 @@ func Evaluate(in Input) (Result, error) {
 			}
 			row.Strength = ptr(strength)
 			row.Status = "target"
-			if strength == Milli(50*row.Old) {
+			if strength == Ratio(float64(row.Old)/float64(scale)) {
 				row.Status = "hold"
 			}
 		}
-		cap := Milli(50 * in.Caps[i])
+		cap := Ratio(float64(in.Caps[i]) / float64(scale))
 		if row.Strength != nil && *row.Strength > cap || row.Strength == nil && row.Old > in.Caps[i] {
 			row.Strength = ptr(cap)
 			row.Status = "operator-cap"

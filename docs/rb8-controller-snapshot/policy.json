@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "authorized_by": [
+    "pt70u",
+    "pt68u",
+    "pt69u",
+    "pt79u",
+    "pt80u"
+  ],
+  "main_sha": "88e0646ff79d8b99e27164c6ae6267aa505a234b",
+  "ids": [
+    2,
+    23,
+    26,
+    32,
+    67,
+    68,
+    72,
+    73
+  ],
+  "profiles": {
+    "GPT": [
+      2,
+      23,
+      26,
+      32,
+      73
+    ],
+    "CC": [
+      67,
+      68,
+      72
+    ]
+  },
+  "weight_scale": 50,
+  "window_seconds": 3600,
+  "probe_tokens": [
+    0,
+    38,
+    1305,
+    1318
+  ],
+  "min_real_success": 30,
+  "min_latency_n": 20,
+  "confidence_k": 50,
+  "components": {
+    "ttft": 0.35,
+    "matched_e2e": 0.35,
+    "e2e_tps": 0.3
+  },
+  "min_common_stratum_n": 5,
+  "max_performance_step": 6,
+  "min_opportunity_ratio": 0.7,
+  "krl_recovery": {
+    "start_weight": 30,
+    "special_rise_lock": false,
+    "weight_policy": "same_independent_layer_as_other_gpt",
+    "missing_pair_or_baseline": "observational_only_does_not_block_rise",
+    "amended_at": "2026-11-26T16:44:00+08:00",
+    "authorized_by": "pt79u",
+    "note": "30 is only the post-cap starting point. Window consumption stays observational; unidentifiable pairs/TTFT baseline no longer hold weight at 30. Independent mapping floor(50*q+.5), max_performance_step 6, and fault cap30 remain. Rescue/retry evidence may only block increases. Unknown alone does not block increases (all GPT/CC, no KRL-specific lock). Do not skip ±6 to jump to 50.",
+    "window_observation": {
+      "window_seconds": 1800,
+      "min_success_per_window": 50,
+      "min_tokens": 3,
+      "max_token_share": 0.5,
+      "min_ttft": 30,
+      "ttft_p50_max": 15,
+      "ttft_p90_max": 30,
+      "does_not_gate_weight": true
+    },
+    "legacy_unused_for_weight": {
+      "step": 2,
+      "min_step_seconds": 3600,
+      "min_pairs": 20,
+      "paired_ratio_max": 1.2,
+      "min_improvement": 0.2
+    },
+    "unknown_alone_blocks_increase": false,
+    "amended_at_pt80u": "2026-11-26T20:14:00+08:00",
+    "authorized_by_pt80u": "pt80u"
+  },
+  "fault": {
+    "severe_min_n": 20,
+    "severe_rate": 0.05,
+    "severe_min_count": 2,
+    "recent_seconds": 600,
+    "recent_min_count": 2
+  },
+  "route_cache_verified": false,
+  "increase_blocks": {
+    "unknown_alone": false,
+    "retry_not_original": true,
+    "note": "Unknown alone does not block an earned increase on any GPT/CC channel. Rescue/retry evidence may only block increases. Confirmed channel_fault and explicit_empty still use fault cap30. Authorized 2026-11-26 pt80u."
+  }
+}

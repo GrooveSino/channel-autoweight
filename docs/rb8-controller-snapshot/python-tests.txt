@@ -1,0 +1,14 @@
+test_disparity_and_missing (test_rb8.RB8Tests.test_disparity_and_missing) ... ok
+test_exact_scope_and_six_columns (test_rb8.RB8Tests.test_exact_scope_and_six_columns) ... ok
+test_fault_cap30_still_applies_with_unknown (test_rb8.RB8Tests.test_fault_cap30_still_applies_with_unknown) ... ok
+test_fault_recovery_and_caps (test_rb8.RB8Tests.test_fault_recovery_and_caps) ... ok
+test_krl_nonoverlap (test_rb8.RB8Tests.test_krl_nonoverlap) ... ok
+test_no_rescue_no_fake_empty (test_rb8.RB8Tests.test_no_rescue_no_fake_empty) ... ok
+test_normalization (test_rb8.RB8Tests.test_normalization) ... ok
+test_original_48_based_review_boundaries (test_rb8.RB8Tests.test_original_48_based_review_boundaries) ... ok
+test_unknown_alone_does_not_block_increase_and_step_cap (test_rb8.RB8Tests.test_unknown_alone_does_not_block_increase_and_step_cap) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.022s
+
+OK

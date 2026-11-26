@@ -1,0 +1,68 @@
+{
+  "round": 107,
+  "run_dir": "/workspace/ops/channel-weight-only/runs/rb8-20261126-180326+0800",
+  "window_start": "2026-11-26T17:03:27+08:00",
+  "window_end": "2026-11-26T18:03:27+08:00",
+  "current_26": 30,
+  "old_final_target_26": 30,
+  "old_reasons_26": [
+    "observational descriptive evidence, not causal algorithm score",
+    "unknown/retry evidence blocks increases"
+  ],
+  "old_independent_mapping_26": 36,
+  "old_independent_normalized_26": 0.726,
+  "new_independent_normalized_26": 0.726,
+  "new_independent_mapping_26": 36,
+  "new_final_target_26": 36,
+  "new_reasons_26": [
+    "observational descriptive evidence, not causal algorithm score"
+  ],
+  "delta": 6,
+  "within_pm6": true,
+  "did_not_jump_to_50": true,
+  "did_not_jump_to_mapping": true,
+  "unknown": 2,
+  "client": 0,
+  "channel_fault": 0,
+  "explicit_empty": 0,
+  "retry_not_original": 0,
+  "recent_faults": 0,
+  "faults": 0,
+  "expected_if_108_or_mapping42": null,
+  "other_new_targets": {
+    "2": [
+      45,
+      46
+    ],
+    "23": [
+      32,
+      38
+    ],
+    "32": [
+      41,
+      47
+    ],
+    "67": [
+      43,
+      43
+    ],
+    "68": [
+      46,
+      46
+    ],
+    "72": [
+      48,
+      49
+    ],
+    "73": [
+      34,
+      29
+    ]
+  },
+  "other_vs_official_final_after_caps": {
+    "2": [
+      45,
+      46
+    ]
+  }
+}

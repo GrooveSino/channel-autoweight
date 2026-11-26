@@ -1,0 +1,37 @@
+{
+  "passed": true,
+  "manifest_sha256": "d2f0c23dfade8d796ca524a703fc86db49714c5e703dd637dbb9a7da124abdd3",
+  "checks": [
+    "controller Python 9 tests (unknown alone no longer blocks ±6 increase; rescue/retry still blocks increase only; fault cap30 still applies on 10m and 1h paths; ±6 cap; KRL same independent layer; window ledger observational only)",
+    "isolated PostgreSQL17 runner builder 0/50 apply and conditional rollback (production_access false)",
+    "offline replay of round 108 export: [KRL]-GPT-0.13 30→36 (mapping 42, +6 cap, unknown=3, channel_fault=0); not 30, not 42, not 50; other 7 channels match official finals",
+    "offline replay of round 107 export: [KRL]-GPT-0.13 30→36 (mapping 36, unknown=2, channel_fault=0)",
+    "no production --apply in this amendment"
+  ],
+  "production_writes": false,
+  "post_first_round_hardening": "Explicit frt_version=2 required to confirm effective empty; otherwise unknown. Full controller+real Postgres tests rerun.",
+  "boundary_correction": {
+    "baseline": 48,
+    "interval": 10,
+    "next_review_at": 88,
+    "controller_tests": 7,
+    "isolated_pg_passed": true,
+    "no_second_apply": true
+  },
+  "policy_amendment": {
+    "at": "2026-11-26T16:44:00+08:00",
+    "authorized_by": "pt79u",
+    "summary": "Revoke KRL special rise lock; same independent layer as other GPT channels",
+    "previous_manifest_sha256": "c30cc3420bdecce35f96132119cb1fa9e171a0df7dd899c5d10e6d50695df0b6",
+    "backup": "/workspace/ops/rb8-v2-20261125/krl-unlock-normal-logic-20261126/backup-before-20261126-165031+0800"
+  },
+  "policy_amendment_pt80u": {
+    "at": "2026-11-26T20:14:00+08:00",
+    "authorized_by": "pt80u",
+    "summary": "Unknown alone no longer blocks increases on any GPT/CC channel; rescue/retry may only block increases; fault cap30 and ±6 remain",
+    "previous_manifest_sha256": "601dc550c3478eb5b9ef021ec7c05f590fa544e774bbeacd43e82c1d6315a2c9",
+    "backup": "/workspace/ops/rb8-v2-20261125/unknown-unblock-20261126/backup-before-20261126-202209+0800"
+  },
+  "controller_tests": 9,
+  "isolated_pg_passed": true
+}
